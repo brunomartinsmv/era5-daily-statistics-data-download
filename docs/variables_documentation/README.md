@@ -89,7 +89,7 @@ This documentation is designed for:
 To download these variables, use the scripts in the main repository:
 
 ```bash
-python download_era5_daily.py --variables VARIABLE_NAME --start-year YYYY --end-year YYYY
+python3 download_era5_daily.py daily-statistics --variables VARIABLE_NAME --start-year YYYY --end-year YYYY
 ```
 
 See the main [README.md](../../README.md) for complete usage instructions.

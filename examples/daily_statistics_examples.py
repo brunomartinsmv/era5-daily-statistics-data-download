@@ -6,6 +6,13 @@ This script demonstrates various use cases for downloading ERA5 data.
 Modify the examples below to suit your needs.
 """
 
+from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from download_era5_daily import download_era5_daily_stats
 
 
@@ -148,14 +155,14 @@ def main():
     
     NOTE: Before running this script:
     1. Install requirements: pip install -r requirements.txt
-    2. Set up your CDS API credentials in ~/.cdsapirc
+    2. Copy config/cdsapirc.example to ~/.cdsapirc and add your CDS credentials
     """
     
     print("ERA5 Daily Statistics Download Examples")
     print("=" * 50)
     print("\nIMPORTANT: Make sure you have:")
     print("1. Installed cdsapi: pip install -r requirements.txt")
-    print("2. Created ~/.cdsapirc with your CDS API credentials")
+    print("2. Copied config/cdsapirc.example to ~/.cdsapirc and added your CDS credentials")
     print("3. Accepted the terms and conditions at:")
     print("   https://cds.climate.copernicus.eu/datasets/derived-era5-single-levels-daily-statistics")
     print("\n" + "=" * 50 + "\n")

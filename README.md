@@ -1,70 +1,53 @@
 # ERA5 Data Download
+
 [![DOI](https://zenodo.org/badge/1154868167.svg)](https://doi.org/10.5281/zenodo.18674894)
 
-Unified script to download several ERA5 products using the Copernicus Climate Data Store (CDS) API, with a Markdown checklist tracking variables, download status, and processing status.
+Tools to download ERA5 data from the Copernicus Climate Data Store (CDS) API.
+The main entrypoint supports daily statistics, hourly single levels, ERA5-Land,
+pressure levels, and ERA5 model levels. The operational variable inventory lives
+in [docs/era5_variable_checklist.md](docs/era5_variable_checklist.md).
 
-## Dataset Information
+## Datasets
 
-This repository provides tools to download data from these ERA5 products:
+This repository supports requests for:
+
 - `derived-era5-single-levels-daily-statistics`
 - `reanalysis-era5-single-levels`
 - `reanalysis-era5-land`
 - `reanalysis-era5-pressure-levels`
 - `reanalysis-era5-complete` for model levels through MARS-style requests
 
-The operational variable inventory lives in [docs/era5_variable_checklist.md](docs/era5_variable_checklist.md).
-
 ## Prerequisites
 
-### 1. Python Environment
 - Python 3.6 or higher
-- pip package manager
+- `pip`
+- A CDS account with accepted terms for each ERA5 product you plan to download
+- A configured `~/.cdsapirc` credentials file
 
-### 2. CDS API Account
-Before using these scripts, you need to:
+Create `~/.cdsapirc` from the repository template:
 
-1. **Register** for a free account at the [Copernicus Climate Data Store](https://cds.climate.copernicus.eu/)
-2. **Accept the terms and conditions** for each ERA5 product you plan to download in the CDS portal.
-3. **Get your API credentials**:
-   - Login to CDS
-   - Go to https://cds.climate.copernicus.eu/how-to-api
-   - Copy your UID and API key
-
-### 3. Configure API Credentials
-
-Create a file `~/.cdsapirc` (in your home directory) with your credentials:
-
+```bash
+cp config/cdsapirc.example ~/.cdsapirc
 ```
+
+Then edit `~/.cdsapirc` with your CDS UID and API key:
+
+```text
 url: https://cds.climate.copernicus.eu/api
 key: UID:API-KEY
 ```
 
-Replace `UID` with your user ID and `API-KEY` with your actual API key.
-
-Alternatively, copy the example file and edit it:
-```bash
-cp .cdsapirc.example ~/.cdsapirc
-# Edit ~/.cdsapirc with your credentials
-```
-
 ## Installation
 
-1. Clone this repository:
 ```bash
-git clone https://github.com/brunomartinsmv/ear5-data-download.git
-cd ear5-data-download
-```
-
-2. Install required dependencies:
-```bash
+git clone https://github.com/brunomartinsmv/era5-daily-statistics-data-download.git
+cd era5-daily-statistics-data-download
 pip install -r requirements.txt
 ```
 
 ## Usage
 
-### Command-Line Usage
-
-The main script `download_era5_daily.py` provides one entrypoint with subcommands:
+The main script is [download_era5_daily.py](download_era5_daily.py):
 
 ```bash
 python3 download_era5_daily.py <preset> --start-year YEAR --end-year YEAR [OPTIONS]
@@ -78,7 +61,8 @@ Available presets:
 - `pressure-levels`: hourly pressure-level fields
 - `model-levels`: ERA5 model levels from `reanalysis-era5-complete`
 
-Use `--dry-run` before real downloads. It prints the target files and the first CDS request without contacting CDS:
+Use `--dry-run` before real downloads. It prints target files and the first CDS
+request without contacting CDS:
 
 ```bash
 python3 download_era5_daily.py daily-statistics \
@@ -89,15 +73,17 @@ python3 download_era5_daily.py daily-statistics \
 ```
 
 Common options:
+
 - `--variables`: override the preset variable list
 - `--area`: bounding box as `N W S E`
 - `--output-dir`: output directory for generated files
 - `--overwrite`: download even when the target file already exists
 - `--sleep-seconds`: pause between requests
 
-### Examples
+## Examples
 
-#### Example 1: Download 2m temperature for recent years
+Download 2 m temperature for recent years:
+
 ```bash
 python3 download_era5_daily.py daily-statistics \
     --variables 2m_temperature \
@@ -106,7 +92,8 @@ python3 download_era5_daily.py daily-statistics \
     --output temp_2020_2023.nc
 ```
 
-#### Example 2: Download multiple variables
+Download multiple variables:
+
 ```bash
 python3 download_era5_daily.py daily-statistics \
     --variables 2m_temperature total_precipitation 10m_u_component_of_wind \
@@ -114,7 +101,8 @@ python3 download_era5_daily.py daily-statistics \
     --end-year 2022
 ```
 
-#### Example 3: Download maximum temperature for summer months
+Download maximum temperature for selected months:
+
 ```bash
 python3 download_era5_daily.py daily-statistics \
     --variables 2m_temperature \
@@ -124,36 +112,8 @@ python3 download_era5_daily.py daily-statistics \
     --statistic daily_maximum
 ```
 
-#### Example 4: Download data for a specific region (Europe)
-```bash
-python3 download_era5_daily.py daily-statistics \
-    --variables 2m_temperature total_precipitation \
-    --start-year 2023 \
-    --end-year 2023 \
-    --area 71 -25 35 40
-```
+Dry-run hourly single-level data:
 
-#### Example 5: Download historical data from 1940s
-```bash
-python3 download_era5_daily.py daily-statistics \
-    --variables 2m_temperature \
-    --start-year 1940 \
-    --end-year 1945
-```
-
-#### Example 6: Download variables for evapotranspiration analysis (Cuiaba, Brazil)
-```bash
-python3 download_era5_daily.py daily-statistics \
-    --variables 2m_temperature 2m_dewpoint_temperature 10m_u_component_of_wind 10m_v_component_of_wind surface_net_solar_radiation surface_pressure total_precipitation total_evaporation \
-    --start-year 2020 \
-    --end-year 2023 \
-    --area -13.6 -58.1 -17.6 -54.1 \
-    --output era5_evapotranspiration_cuiaba_2020_2023.nc
-```
-
-This downloads all variables needed for evapotranspiration analysis using methods like Penman-Monteith or FAO-56.
-
-#### Example 7: Dry-run hourly single-level data
 ```bash
 python3 download_era5_daily.py single-levels \
     --start-year 2020 \
@@ -162,7 +122,8 @@ python3 download_era5_daily.py single-levels \
     --dry-run
 ```
 
-#### Example 8: Dry-run model levels
+Dry-run model levels:
+
 ```bash
 python3 download_era5_daily.py model-levels \
     --start-year 2020 \
@@ -172,138 +133,111 @@ python3 download_era5_daily.py model-levels \
     --dry-run
 ```
 
-### Using the Python API
+Additional runnable examples live in [examples/](examples/).
 
-You can also use the download function directly in your Python scripts:
+## Python API
 
 ```python
 from download_era5_daily import download_era5_daily_stats
 
-# Download 2m temperature for 2020-2023
 download_era5_daily_stats(
-    variables=['2m_temperature'],
+    variables=["2m_temperature"],
     year_start=2020,
     year_end=2023,
-    daily_statistic='daily_mean',
-    output_file='temperature_data.nc'
+    daily_statistic="daily_mean",
+    output_file="temperature_data.nc",
 )
 ```
 
-See `examples.py` for legacy daily-statistics API examples.
+See [examples/daily_statistics_examples.py](examples/daily_statistics_examples.py)
+for legacy daily-statistics API examples.
 
-## Available Variables
+## Auxiliary Scripts
 
-Common variables include:
-- `2m_temperature` - 2 metre temperature
-- `total_precipitation` - Total precipitation
-- `10m_u_component_of_wind` - 10 metre U wind component
-- `10m_v_component_of_wind` - 10 metre V wind component
-- `surface_pressure` - Surface pressure
-- `mean_sea_level_pressure` - Mean sea level pressure
-- `2m_dewpoint_temperature` - 2 metre dewpoint temperature
-- `sea_surface_temperature` - Sea surface temperature
+The [scripts/](scripts/) directory contains specialized ERA5 utilities that are
+kept separate from the main public entrypoint:
 
-For the repository's operational variable checklist, see [docs/era5_variable_checklist.md](docs/era5_variable_checklist.md). For the complete official variable lists, check the relevant CDS dataset page.
+```bash
+python3 scripts/download_era5_model_levels.py --start-year 2020 --end-year 2020 --start-month 1 --end-month 1 --dry-run
+python3 scripts/download_era5_temperature_regime_vars.py --start-year 2020 --end-year 2020 --start-month 1 --end-month 1 --dry-run
+```
 
-### Variable Documentation
+## Documentation
 
-For detailed scientific documentation on each ERA5 variable, including physical descriptions, applications, units, and references, see:
-- **[docs/variables_documentation/](docs/variables_documentation/)** - Comprehensive PhD-level documentation for all variables
-
-Each variable is documented with:
-- Scientific description and physical context
-- Units and typical value ranges
-- Applications in climate research
-- Mathematical relationships and equations
-- Quality considerations and limitations
-- Key scientific references
-
-### Evapotranspiration Analysis
-
-For a detailed guide on downloading and analyzing evapotranspiration data, including variable descriptions and calculation methods, see:
-- **[docs/EVAPOTRANSPIRATION_GUIDE.md](docs/EVAPOTRANSPIRATION_GUIDE.md)** - Comprehensive guide for ET analysis with Cuiaba example
+- [docs/era5_variable_checklist.md](docs/era5_variable_checklist.md): operational variable checklist
+- [docs/EVAPOTRANSPIRATION_GUIDE.md](docs/EVAPOTRANSPIRATION_GUIDE.md): evapotranspiration guide
+- [docs/variables_documentation/](docs/variables_documentation/): scientific notes for ERA5 variables
+- [config/](config/): configuration templates
 
 ## Output Format
 
-Daily-statistics downloads are saved as NetCDF (`.nc`) by default. Hourly ERA5 product downloads are saved as ZIP files containing GRIB by default. These formats can be read with:
+Daily-statistics downloads are saved as NetCDF (`.nc`) by default. Hourly ERA5
+product downloads are saved as ZIP files containing GRIB by default. These
+formats can be read with:
+
 - Python: `xarray`, `netCDF4`, `pandas`
 - R: `ncdf4`, `raster`
-- MATLAB: built-in `ncread` function
+- MATLAB: built-in `ncread`
 - Other tools: CDO, NCO, Panoply
-
-### Reading Downloaded Data with Python
-
-```python
-import xarray as xr
-
-# Open the downloaded file
-ds = xr.open_dataset('era5_daily_stats_2020_2023.nc')
-
-# Explore the data
-print(ds)
-
-# Access a specific variable
-temperature = ds['t2m']  # or the variable name in the file
-
-# Plot the data (requires matplotlib)
-temperature.isel(time=0).plot()
-```
 
 ## Notes and Best Practices
 
-1. **Download Size**: ERA5 data files can be very large. Start with small requests (e.g., one year, one variable) to test your setup.
-
-2. **Processing Time**: The CDS API may queue your request. Large downloads can take considerable time to process on the server side.
-
-3. **Rate Limits**: The CDS API has rate limits. Avoid making too many simultaneous requests.
-
-4. **Storage**: Ensure you have sufficient disk space for the downloaded data.
-
-5. **Data Usage**: Please cite the ERA5 dataset in any publications:
-   > Hersbach, H., et al. (2020): ERA5 hourly data on single levels from 1940 to present. Copernicus Climate Change Service (C3S) Climate Data Store (CDS).
+1. Start with small requests, such as one year and one variable.
+2. The CDS API may queue large requests for a long time.
+3. Avoid many simultaneous requests because CDS applies rate limits.
+4. Check local disk space before downloading large ERA5 products.
+5. Cite ERA5 data in publications:
+   Hersbach, H., et al. (2020). ERA5 hourly data on single levels from 1940 to present. Copernicus Climate Change Service (C3S) Climate Data Store (CDS).
 
 ## Troubleshooting
 
 ### Authentication Error
-- Verify your `~/.cdsapirc` file is correctly formatted
-- Check that you've accepted the dataset terms and conditions
-- Ensure your API key is valid
+
+- Verify that `~/.cdsapirc` is correctly formatted.
+- Check that you accepted the dataset terms and conditions.
+- Confirm that your API key is valid.
 
 ### Connection Timeout
-- Check your internet connection
-- The CDS servers may be experiencing high load; try again later
+
+- Check your internet connection.
+- CDS servers may be under high load; try again later.
 
 ### Invalid Parameter Error
-- Verify variable names are correct (check the dataset documentation)
-- Ensure year range is valid (1940 onwards)
-- Check that month format is correct (01-12)
 
-## License
-
-This repository contains scripts for downloading ERA5 data. The scripts themselves are provided as-is for use with the Copernicus Climate Data Store. Please refer to the [Copernicus License](https://cds.climate.copernicus.eu/disclaimer-privacy) for terms regarding the ERA5 data itself.
+- Verify variable names against the dataset documentation.
+- Ensure the year range is valid.
+- Check month formatting for `01` through `12`.
 
 ## Repository Structure
 
-```
+```text
 .
-├── download_era5_daily.py         # Unified download script with preset subcommands
-├── examples.py                    # Example usage scripts
-├── requirements.txt               # Python dependencies
-├── .cdsapirc.example             # Example API configuration file
-├── docs/                         # Documentation
-│   ├── era5_variable_checklist.md     # Operational variable/download checklist
-│   ├── EVAPOTRANSPIRATION_GUIDE.md    # Guide for ET analysis
-│   └── variables_documentation/       # Detailed variable docs
-│       ├── README.md                  # Variables documentation index
-│       ├── 2m_temperature.md          # Temperature documentation
-│       ├── total_precipitation.md     # Precipitation documentation
-│       └── ...                        # Other variable docs
-└── README.md                     # This file
+├── config/                       # Local configuration templates
+│   ├── README.md
+│   └── cdsapirc.example
+├── docs/                         # Project and scientific documentation
+│   ├── README.md
+│   ├── EVAPOTRANSPIRATION_GUIDE.md
+│   ├── era5_variable_checklist.md
+│   └── variables_documentation/
+├── examples/                     # Runnable usage examples
+│   ├── README.md
+│   └── daily_statistics_examples.py
+├── scripts/                      # Auxiliary ERA5 download utilities
+│   ├── README.md
+│   ├── download_era5_model_levels.py
+│   └── download_era5_temperature_regime_vars.py
+├── download_era5_daily.py         # Main public entrypoint
+├── requirements.txt
+└── README.md
 ```
 
-## Contributing
+## License
 
-Contributions are welcome! Please feel free to submit issues or pull requests.
+This repository contains scripts for downloading ERA5 data. The scripts are
+provided as-is for use with the Copernicus Climate Data Store. See the
+[Copernicus License](https://cds.climate.copernicus.eu/disclaimer-privacy) for
+terms regarding ERA5 data.
 
 ## Resources
 

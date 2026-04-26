@@ -63,7 +63,7 @@ See [variables_documentation/README.md](variables_documentation/README.md) for t
 2. **Planning downloads?** Use [era5_variable_checklist.md](era5_variable_checklist.md)
 3. **Need ET analysis?** Go to [EVAPOTRANSPIRATION_GUIDE.md](EVAPOTRANSPIRATION_GUIDE.md)
 4. **Want to understand a specific variable?** Browse [variables_documentation/](variables_documentation/)
-5. **Looking for examples?** Check out [../examples.py](../examples.py) in the root directory
+5. **Looking for examples?** Check out [../examples/](../examples/)
 
 ## Using the Documentation
 
@@ -117,7 +117,7 @@ When using ERA5 data in publications, please cite:
 
 ## Contributing
 
-Found an error or have suggestions for improving the documentation? Please open an issue or submit a pull request on the [GitHub repository](https://github.com/brunomartinsmv/ear5-daily-statistics-data-download).
+Found an error or have suggestions for improving the documentation? Please open an issue or submit a pull request on the [GitHub repository](https://github.com/brunomartinsmv/era5-daily-statistics-data-download).
 
 ---
 

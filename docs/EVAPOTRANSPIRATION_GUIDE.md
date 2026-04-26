@@ -189,7 +189,7 @@ download_era5_daily_stats(
 
 Or using the command line:
 ```bash
-python download_era5_daily.py \
+python3 download_era5_daily.py daily-statistics \
     --variables 2m_temperature 2m_dewpoint_temperature \
                 10m_u_component_of_wind 10m_v_component_of_wind \
                 surface_net_solar_radiation surface_pressure \
@@ -202,7 +202,7 @@ python download_era5_daily.py \
 
 Or run the example directly:
 ```bash
-python examples.py
+python3 examples/daily_statistics_examples.py
 # Then uncomment: example_evapotranspiration_cuiaba()
 ```
 
