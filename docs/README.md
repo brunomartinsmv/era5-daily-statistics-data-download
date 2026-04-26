@@ -4,6 +4,17 @@ This directory contains comprehensive documentation for the ERA5 Daily Statistic
 
 ## Contents
 
+### [era5_variable_checklist.md](era5_variable_checklist.md)
+
+Operational checklist for ERA5 downloads:
+- one row per variable
+- ERA5 product and category
+- temporal and spatial resolution
+- download status
+- processing status
+- expected output file pattern
+- short notes for water, soil, profile, and model-level variables
+
 ### [EVAPOTRANSPIRATION_GUIDE.md](EVAPOTRANSPIRATION_GUIDE.md)
 
 Complete guide for evapotranspiration (ET) analysis using ERA5 data:
@@ -49,9 +60,10 @@ See [variables_documentation/README.md](variables_documentation/README.md) for t
 ## Quick Start
 
 1. **New to ERA5 data?** Start with the main [README.md](../README.md) for installation and basic usage
-2. **Need ET analysis?** Go to [EVAPOTRANSPIRATION_GUIDE.md](EVAPOTRANSPIRATION_GUIDE.md)
-3. **Want to understand a specific variable?** Browse [variables_documentation/](variables_documentation/)
-4. **Looking for examples?** Check out [../examples.py](../examples.py) in the root directory
+2. **Planning downloads?** Use [era5_variable_checklist.md](era5_variable_checklist.md)
+3. **Need ET analysis?** Go to [EVAPOTRANSPIRATION_GUIDE.md](EVAPOTRANSPIRATION_GUIDE.md)
+4. **Want to understand a specific variable?** Browse [variables_documentation/](variables_documentation/)
+5. **Looking for examples?** Check out [../examples.py](../examples.py) in the root directory
 
 ## Using the Documentation
 
@@ -81,8 +93,8 @@ See [variables_documentation/README.md](variables_documentation/README.md) for t
 
 ## Dataset Information
 
-- **Dataset**: ERA5 post-processed daily statistics on single levels
-- **Dataset ID**: `derived-era5-single-levels-daily-statistics`
+- **Products**: ERA5 daily statistics, hourly single levels, ERA5-Land, pressure levels, and model levels
+- **Primary daily-statistics dataset ID**: `derived-era5-single-levels-daily-statistics`
 - **Provider**: Copernicus Climate Data Store (CDS)
 - **Temporal Coverage**: 1940 to present
 - **Spatial Resolution**: ~0.25° × 0.25° (approximately 25-30 km)
@@ -109,4 +121,4 @@ Found an error or have suggestions for improving the documentation? Please open 
 
 ---
 
-*Last Updated: 2026-02-10*
+*Last Updated: 2026-04-25*
