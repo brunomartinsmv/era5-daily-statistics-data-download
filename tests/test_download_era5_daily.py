@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -242,6 +244,40 @@ class OutputPathTests(unittest.TestCase):
         )
         self.assertEqual(forward, reverse)
         self.assertIn("2m_temperature_surface_pressure", forward.name)
+
+    def test_pressure_level_order_does_not_change_the_path(self) -> None:
+        def build(levels: list[str]) -> era5.DownloadTarget:
+            args = era5.argparse.Namespace(
+                start_year=2020,
+                end_year=2020,
+                start_month=1,
+                end_month=1,
+                variables=["temperature"],
+                area=None,
+                format="netcdf",
+                download_format="unarchived",
+                chunk="month",
+                output_dir="downloads",
+                pressure_levels=levels,
+            )
+            return era5.build_hourly_targets(args, "pressure-levels", era5.DATASET_PRESSURE_LEVELS)[0]
+
+        descending = build(["1000", "850", "500"])
+        ascending = build(["500", "850", "1000"])
+        self.assertEqual(descending.output, ascending.output)
+        self.assertEqual(descending.request["pressure_level"], ["500", "850", "1000"])
+        self.assertEqual(ascending.request["pressure_level"], ["500", "850", "1000"])
+        fingerprint = era5._request_fingerprint(descending.request)
+        self.assertEqual(fingerprint, era5._request_fingerprint(ascending.request))
+        self.assertIn(fingerprint, descending.output.name)
+
+        named = build(["b", "a"])
+        renamed = build(["a", "b"])
+        self.assertEqual(named.output, renamed.output)
+        self.assertEqual(named.request["pressure_level"], ["a", "b"])
+
+        other_levels = build(["850", "700"])
+        self.assertNotEqual(descending.output, other_levels.output)
 
 
 class MonthValidationTests(unittest.TestCase):
@@ -495,6 +531,68 @@ class AtomicDownloadTests(unittest.TestCase):
             second.join(5)
             self.assertFalse(first.is_alive())
             self.assertFalse(second.is_alive())
+
+    def test_windows_lock_waits_past_the_ten_second_give_up(self) -> None:
+        entered = False
+        attempts = {"n": 0}
+        modes: list[int] = []
+        sleeps: list[float] = []
+
+        class FakeMsvcrt:
+            LK_NBLCK = 2
+            LK_LOCK = 1
+            LK_UNLCK = 0
+
+            @staticmethod
+            def locking(fd: int, mode: int, nbytes: int) -> None:
+                modes.append(mode)
+                if mode == FakeMsvcrt.LK_UNLCK:
+                    return
+                attempts["n"] += 1
+                if attempts["n"] <= 12:
+                    error = OSError("region locked")
+                    error.errno = errno.EACCES if attempts["n"] % 2 else errno.EDEADLK
+                    raise error
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            with patch.object(era5.sys, "platform", "win32"):
+                with patch.dict(sys.modules, {"msvcrt": FakeMsvcrt}):
+                    with patch.object(era5.time, "sleep", sleeps.append):
+                        with era5._exclusive_output_lock(dest):
+                            entered = True
+
+        self.assertTrue(entered)
+        self.assertGreater(attempts["n"], 10)
+        self.assertNotIn(FakeMsvcrt.LK_LOCK, modes)
+        self.assertEqual(sleeps, [era5._WINDOWS_LOCK_POLL_SECONDS] * 12)
+        self.assertEqual(modes[-1], FakeMsvcrt.LK_UNLCK)
+
+    def test_windows_lock_does_not_retry_a_bad_descriptor(self) -> None:
+        calls = {"n": 0}
+
+        class FakeMsvcrt:
+            LK_NBLCK = 2
+
+            @staticmethod
+            def locking(fd: int, mode: int, nbytes: int) -> None:
+                calls["n"] += 1
+                error = OSError("bad fd")
+                error.errno = errno.EBADF
+                raise error
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fd = os.open(Path(tmpdir) / "lock", os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                with patch.object(era5.sys, "platform", "win32"):
+                    with patch.dict(sys.modules, {"msvcrt": FakeMsvcrt}):
+                        with self.assertRaises(OSError) as caught:
+                            era5._acquire_file_lock(fd)
+            finally:
+                os.close(fd)
+
+        self.assertEqual(caught.exception.errno, errno.EBADF)
+        self.assertEqual(calls["n"], 1)
 
     def test_pid_text_in_a_lock_file_does_not_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

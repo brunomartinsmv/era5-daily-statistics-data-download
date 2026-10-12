@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import errno
 import hashlib
 import json
 import os
@@ -314,6 +315,22 @@ def build_hourly_targets(args: argparse.Namespace, preset: str, dataset: str) ->
     return targets
 
 
+def _canonical_pressure_levels(levels: list[str]) -> list[str]:
+    """Numeric order so the same levels share one request hash and filename.
+
+    ``json.dumps`` keeps list order, and the default path embeds that hash.
+    ``1000`` sorts before ``850`` as text, so the key is the integer value.
+    """
+
+    def sort_key(level: str) -> tuple[int, int | str, str]:
+        try:
+            return (0, int(level), level)
+        except ValueError:
+            return (1, level, level)
+
+    return sorted(levels, key=sort_key)
+
+
 def _build_hourly_request(
     args: argparse.Namespace,
     dataset: str,
@@ -335,7 +352,7 @@ def _build_hourly_request(
     if dataset != DATASET_LAND:
         request["product_type"] = "reanalysis"
     if dataset == DATASET_PRESSURE_LEVELS:
-        request["pressure_level"] = args.pressure_levels
+        request["pressure_level"] = _canonical_pressure_levels(list(args.pressure_levels))
     return request
 
 
@@ -417,11 +434,19 @@ def _staging_path(output: Path) -> Path:
     return output.with_name(f"part-{uuid.uuid4().hex}.part")
 
 
+_WINDOWS_LOCK_POLL_SECONDS = 0.2
+# ``msvcrt.LK_NBLCK`` raises these when another process still holds the region.
+_WINDOWS_LOCK_BUSY = {errno.EACCES, errno.EDEADLK, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
+
+
 def _acquire_file_lock(fd: int) -> None:
     """Block on a kernel lock released automatically when the holder exits.
 
-    Unix uses ``flock``. Windows uses ``msvcrt.locking``; ``os.kill(pid, 0)``
-    is not a liveness probe there because signal 0 terminates the process.
+    Unix uses ``flock``, which waits with no timeout. Windows ``msvcrt.LK_LOCK``
+    retries for about ten seconds and then raises, so a second run would record
+    a long CDS transfer as a download failure. ``LK_NBLCK`` is polled until the
+    other holder releases the region. ``os.kill(pid, 0)`` is not a liveness
+    probe on Windows because signal 0 terminates the process.
     """
     if sys.platform == "win32":
         import msvcrt
@@ -430,8 +455,14 @@ def _acquire_file_lock(fd: int) -> None:
         if os.fstat(fd).st_size == 0:
             os.write(fd, b"\0")
             os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-        return
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if exc.errno not in _WINDOWS_LOCK_BUSY:
+                    raise
+                time.sleep(_WINDOWS_LOCK_POLL_SECONDS)
     import fcntl
 
     fcntl.flock(fd, fcntl.LOCK_EX)
