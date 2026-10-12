@@ -16,9 +16,10 @@ import os
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 DATASET_DAILY = "derived-era5-single-levels-daily-statistics"
@@ -147,66 +148,83 @@ def _default_output(prefix: str, suffix: str, extension: str, output_dir: Path) 
     return output_dir / f"{prefix}_{suffix}.{extension}"
 
 
-def _single_output_path(
-    args: argparse.Namespace,
-    prefix: str,
-    extension: str,
-    request: dict[str, Any] | None = None,
-) -> Path:
-    if args.output:
-        return Path(args.output)
-    year_part = f"{args.start_year}" if args.start_year == args.end_year else f"{args.start_year}_{args.end_year}"
-    stat = getattr(args, "statistic", None)
-    stat_part = f"_{stat}" if stat and stat != "daily_mean" else ""
+_REQUEST_FINGERPRINT_HEX_CHARS = 10
+_EMPTY_LOCK_STALE_SECONDS = 5.0
 
-    variables = getattr(args, "variables", None)
-    if variables:
-        if len(variables) <= 2:
-            var_part = f"_{'_'.join(variables)}"
-        else:
-            var_part = f"_{len(variables)}vars"
-    else:
-        var_part = ""
 
-    months = getattr(args, "months", None)
-    if months and len(months) < 12:
-        month_part = f"_m{'-'.join(sorted(months))}"
-    else:
-        month_part = ""
-
+def _daily_statistics_request(args: argparse.Namespace) -> dict[str, Any]:
+    """Canonical daily-statistics request. The default filename hashes this mapping."""
+    variables = getattr(args, "variables", None) or PRESET_VARIABLES["daily-statistics"]
+    request: dict[str, Any] = {
+        "product_type": "reanalysis",
+        "variable": list(variables),
+        "year": [str(year) for year in range(args.start_year, args.end_year + 1)],
+        "month": _months_from_args(getattr(args, "months", None)),
+        "daily_statistic": getattr(args, "statistic", None) or "daily_mean",
+        "time_zone": getattr(args, "time_zone", None) or "utc+00:00",
+        "frequency": getattr(args, "frequency", None) or "1_hourly",
+    }
     area = getattr(args, "area", None)
-    if area is not None:
-        area_slug = "_".join(f"{v:g}" for v in area)
-        area_part = f"_area_{area_slug}"
-    else:
-        area_part = ""
+    if area:
+        request["area"] = [float(value) for value in area]
+    return request
 
-    if request:
-        req_serialized = json.dumps(request, sort_keys=True, ensure_ascii=False)
-        req_hash = f"_{hashlib.sha256(req_serialized.encode()).hexdigest()[:8]}"
-    else:
-        req_hash = ""
 
-    suffix = f"{year_part}{stat_part}{var_part}{month_part}{area_part}{req_hash}"
+def _request_fingerprint(request: dict[str, Any]) -> str:
+    payload = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:_REQUEST_FINGERPRINT_HEX_CHARS]
+
+
+def _filename_token(value: str) -> str:
+    return "".join(char if char.isalnum() or char in "+-_" else "-" for char in value)
+
+
+def _variable_name_part(variables: list[str]) -> str:
+    if not variables:
+        return ""
+    if len(variables) <= 2:
+        return "_" + "_".join(_filename_token(variable) for variable in variables)
+    digest = hashlib.sha256(",".join(sorted(variables)).encode("utf-8")).hexdigest()[:8]
+    return f"_{len(variables)}vars_{digest}"
+
+
+def _month_name_part(months: list[str]) -> str:
+    if months == DEFAULT_MONTHS:
+        return ""
+    return "_m" + "-".join(months)
+
+
+def _area_name_part(area: list[float] | None) -> str:
+    if not area:
+        return ""
+    return "_area_" + "_".join(f"{value:g}" for value in area)
+
+
+def _single_output_path(args: argparse.Namespace, prefix: str, extension: str) -> Path:
+    if getattr(args, "output", None):
+        return Path(args.output)
+    request = _daily_statistics_request(args)
+    years = request["year"]
+    year_part = years[0] if len(years) == 1 else f"{years[0]}_{years[-1]}"
+    statistic = str(request["daily_statistic"])
+    stat_part = f"_{statistic}" if statistic != "daily_mean" else ""
+    suffix = (
+        f"{year_part}{stat_part}"
+        f"{_variable_name_part(list(request['variable']))}"
+        f"{_month_name_part(list(request['month']))}"
+        f"_{_filename_token(str(request['frequency']))}"
+        f"_{_filename_token(str(request['time_zone']))}"
+        f"{_area_name_part(request.get('area'))}"
+        f"_{_request_fingerprint(request)}"
+    )
     return _default_output(prefix, suffix, extension, Path(args.output_dir))
+
 
 def build_daily_statistics_target(args: argparse.Namespace) -> list[DownloadTarget]:
     _validate_years(args.start_year, args.end_year)
     _validate_area(args.area)
-    variables = args.variables or PRESET_VARIABLES["daily-statistics"]
-    months = _months_from_args(args.months)
-    request: dict[str, Any] = {
-        "product_type": "reanalysis",
-        "variable": variables,
-        "year": [str(year) for year in range(args.start_year, args.end_year + 1)],
-        "month": months,
-        "daily_statistic": args.statistic,
-        "time_zone": args.time_zone,
-        "frequency": args.frequency,
-    }
-    if args.area:
-        request["area"] = args.area
-    output = _single_output_path(args, "era5_daily_statistics", "nc", request=request)
+    request = _daily_statistics_request(args)
+    output = _single_output_path(args, "era5_daily_statistics", "nc")
     return [DownloadTarget("daily-statistics", request, output)]
 
 
@@ -383,6 +401,100 @@ def print_dry_run(dataset: str, targets: list[DownloadTarget], overwrite: bool) 
         print(json.dumps(targets[0].request, indent=2, ensure_ascii=False))
 
 
+def _output_lock_path(output: Path) -> Path:
+    return output.with_name(f"{output.name}.lock")
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _lock_pid(token: str) -> int | None:
+    pid_text = token.split("-", 1)[0]
+    if not pid_text.isdigit():
+        return None
+    return int(pid_text)
+
+
+def _lock_is_stale(lock_path: Path, now: float | None = None) -> bool:
+    try:
+        token = lock_path.read_text(encoding="ascii").strip()
+        age = (time.time() if now is None else now) - lock_path.stat().st_mtime
+    except OSError:
+        return False
+    pid = _lock_pid(token)
+    if pid is None:
+        return age >= _EMPTY_LOCK_STALE_SECONDS
+    if pid == os.getpid():
+        return False
+    return not _pid_alive(pid)
+
+
+def _unlink_if_same_inode(path: Path, device: int, inode: int) -> None:
+    try:
+        current = path.stat()
+    except OSError:
+        return
+    if current.st_dev == device and current.st_ino == inode:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+@contextmanager
+def _exclusive_output_lock(output: Path) -> Iterator[None]:
+    """Block until this process exclusively owns ``output``.
+
+    The lock file is removed on exit, including cancellation. A lock whose
+    owner pid is gone, or an empty lock older than a few seconds, is replaced.
+    """
+    lock_path = _output_lock_path(output)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    token = f"{os.getpid()}-{uuid.uuid4().hex}"
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            break
+        except FileExistsError:
+            if _lock_is_stale(lock_path):
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            time.sleep(0.05)
+    stat_result = os.fstat(fd)
+    try:
+        os.write(fd, token.encode("ascii"))
+        yield
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        _unlink_if_same_inode(lock_path, stat_result.st_dev, stat_result.st_ino)
+
+
+def _discard_part_file(part_output: Path) -> None:
+    if not part_output.exists():
+        return
+    try:
+        part_output.unlink()
+    except OSError:
+        pass
+
+
 def retrieve_targets(
     dataset: str,
     targets: list[DownloadTarget],
@@ -407,28 +519,31 @@ def retrieve_targets(
         target.output.parent.mkdir(parents=True, exist_ok=True)
         run_id = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
         part_output = target.output.with_name(f"{target.output.name}.{run_id}.part")
-        print(f"[{target.label}] downloading -> {target.output}")
+        attempted_download = False
         try:
-            if part_output.exists():
-                part_output.unlink()
-            client.retrieve(dataset, target.request).download(str(part_output))
-            part_output.replace(target.output)
-            if successful_targets is not None:
-                successful_targets.append(target)
-            print(f"[{target.label}] ok")
-        except BaseException as exc:  # Clean up staging file on failure or interruption
-            if part_output.exists():
-                try:
-                    part_output.unlink()
-                except OSError:
-                    pass
-            if isinstance(exc, Exception):
-                failures.append(f"{target.label}: {exc}")
-                print(f"[{target.label}] error: {exc}", file=sys.stderr)
-            else:
-                raise
+            with _exclusive_output_lock(target.output):
+                if not overwrite and target.output.exists():
+                    print(f"[{target.label}] already exists, skipping {target.output}")
+                else:
+                    attempted_download = True
+                    print(f"[{target.label}] downloading -> {target.output}")
+                    try:
+                        _discard_part_file(part_output)
+                        client.retrieve(dataset, target.request).download(str(part_output))
+                        if not overwrite and target.output.exists():
+                            print(f"[{target.label}] already exists, skipping {target.output}")
+                        else:
+                            part_output.replace(target.output)
+                            if successful_targets is not None:
+                                successful_targets.append(target)
+                            print(f"[{target.label}] ok")
+                    finally:
+                        _discard_part_file(part_output)
+        except Exception as exc:  # pragma: no cover - depends on CDS/network
+            failures.append(f"{target.label}: {exc}")
+            print(f"[{target.label}] error: {exc}", file=sys.stderr)
 
-        if index < len(targets_to_download) - 1 and sleep_seconds > 0:
+        if attempted_download and index < len(targets_to_download) - 1 and sleep_seconds > 0:
             time.sleep(sleep_seconds)
 
     if failures:

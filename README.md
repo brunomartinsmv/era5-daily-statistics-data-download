@@ -189,9 +189,32 @@ python3 scripts/download_era5_temperature_regime_vars.py --start-year 2020 --end
 ## Output Format
 
 Daily-statistics downloads are saved as NetCDF (`.nc`) by default. Hourly ERA5
-product downloads are saved as ZIP files containing GRIB by default. Downloads
-use atomic writing (`.part` temporary file renamed on completion) to prevent partial
-or corrupted files if a download is interrupted. These formats can be read with:
+product downloads are saved as ZIP files containing GRIB by default.
+
+When `--output` is omitted, the daily-statistics filename is built from the
+request: year span, statistic (other than `daily_mean`), variables, the month
+list when it is not the full year (`m01-02-03-04`, not a month count), sampling
+frequency, time zone, area when set, and a 10-character hash of the canonical
+request. Two queries that differ in months, frequency, time zone, or any other
+request field get different paths, so an existing file is not reused for a
+different query. Equivalent month spellings such as `4` and `04` share a path.
+
+Hourly presets that chunk by year write one file per year. If that year is only
+partly requested, the filename includes the month span
+(`era5_single-levels_2020_11-12.zip`). For a range such as November through
+February across more than two years, the first year starts at `--start-month`,
+the last year ends at `--end-month`, and each year in between is the full
+January–December set.
+
+Each download is written to a unique `.part` file in the same directory and
+renamed into place only after the transfer finishes. The process holds
+`<target>.lock` for the whole transfer and checks the destination again after
+acquiring that lock. A second run with the same target waits, then skips the
+file if it is already present, unless `--overwrite` is set. Cancelling the
+download deletes the partial `.part` file and removes the lock. A lock left by
+a process that is no longer running is discarded on the next attempt.
+
+These formats can be read with:
 
 - Python: `xarray`, `netCDF4`, `pandas`
 - R: `ncdf4`, `raster`
@@ -228,8 +251,8 @@ python3 -m unittest discover -s tests -v
 ```
 
 The tests exercise argument parsing, request construction, deterministic output
-naming, atomic downloads, and `--dry-run` flows for the main entrypoint and
-auxiliary scripts.
+naming, atomic downloads, destination locking, and `--dry-run` flows for the
+main entrypoint and auxiliary scripts.
 
 ## Troubleshooting
 

@@ -16,19 +16,24 @@ include a short summary and link here rather than duplicating the full changelog
 
 - Standard Python packaging via `pyproject.toml` with console script entrypoint `era5-download`
 - GitHub Actions CI workflow in `.github/workflows/ci.yml` running unit tests on Python 3.9 through 3.13, packaging verification, and installed CLI smoke tests
-- Process-exclusive atomic downloads using `<target>.<pid>_<uuid>.part` temporary files to prevent corrupted files and race conditions under concurrent runs
-- Comprehensive unit tests covering atomic downloads, deterministic and variable-aware output filenames, and month validation
+- Atomic downloads using `<target>.<pid>_<uuid>.part` staging files, renamed into place only after the CDS transfer finishes
+- Exclusive `<target>.lock` files so two runs cannot write the same destination at the same time
+- Comprehensive unit tests covering atomic downloads, request-specific output filenames, destination locking, and month validation
 
 ### Changed
 
-- Made `daily-statistics` default output filename deterministic and collision-safe across distinct variable queries, months, and areas
+- Made `daily-statistics` default output filenames deterministic from the CDS request: years, statistic, variables, the explicit month list, frequency, time zone, area, and a short hash of the full request
+- Included the month span in year-chunk hourly filenames when that year is not complete (for example `era5_single-levels_2020_11-12.zip`)
 - Refactored `scripts/download_era5_temperature_regime_vars.py` to reuse `DownloadTarget` and `retrieve_targets` from the core module
 - Allowed multi-year queries across seasonal month boundaries (e.g., `--start-month 11 --end-month 2`) in `_validate_months`
 - Pinned `actions/checkout@v4` in `.github/workflows/pullfrog.yml` for stability and broad runner compatibility
 
 ### Fixed
 
-- Added `*.part` temporary staging files to `.gitignore`
+- Default daily-statistics paths no longer collide when month lists differ only by which months are selected, or when frequency, time zone, or any other request field changes. An existing NetCDF is reused only for the same canonical request
+- Concurrent downloads of one destination wait on a lock and, unless `--overwrite` is set, leave a file that appeared in the meantime untouched
+- Cancelling a download removes the partial `.part` file and releases the destination lock
+- Added `*.part` staging files and `*.lock` files to `.gitignore`
 - Accurately track generated files in `scripts/download_era5_temperature_regime_vars.py` so failed downloads with `--overwrite` do not report pre-existing files as generated
 
 ## [2.0.0] - 2026-07-12
