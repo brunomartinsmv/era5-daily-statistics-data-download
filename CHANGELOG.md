@@ -10,6 +10,27 @@ include a short summary and link here rather than duplicating the full changelog
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-12
+
+### Added
+
+- Standard Python packaging via `pyproject.toml` with console script entrypoint `era5-download`
+- GitHub Actions CI workflow in `.github/workflows/ci.yml` running unit tests on Python 3.9 through 3.13, packaging verification, and installed CLI smoke tests
+- Process-exclusive atomic downloads using `<target>.<pid>_<uuid>.part` temporary files to prevent corrupted files and race conditions under concurrent runs
+- Comprehensive unit tests covering atomic downloads, deterministic and variable-aware output filenames, and month validation
+
+### Changed
+
+- Made `daily-statistics` default output filename deterministic and collision-safe across distinct variable queries, months, and areas
+- Refactored `scripts/download_era5_temperature_regime_vars.py` to reuse `DownloadTarget` and `retrieve_targets` from the core module
+- Allowed multi-year queries across seasonal month boundaries (e.g., `--start-month 11 --end-month 2`) in `_validate_months`
+- Pinned `actions/checkout@v4` in `.github/workflows/pullfrog.yml` for stability and broad runner compatibility
+
+### Fixed
+
+- Added `*.part` temporary staging files to `.gitignore`
+- Accurately track generated files in `scripts/download_era5_temperature_regime_vars.py` so failed downloads with `--overwrite` do not report pre-existing files as generated
+
 ## [2.0.0] - 2026-07-12
 
 ### Added
@@ -62,6 +83,7 @@ include a short summary and link here rather than duplicating the full changelog
 - Example scripts and evapotranspiration analysis guide
 - Documentation organized under `docs/` with navigation README
 
-[Unreleased]: https://github.com/brunomartinsmv/era5-daily-statistics-data-download/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/brunomartinsmv/era5-daily-statistics-data-download/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/brunomartinsmv/era5-daily-statistics-data-download/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/brunomartinsmv/era5-daily-statistics-data-download/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/brunomartinsmv/era5-daily-statistics-data-download/releases/tag/v1.0.0

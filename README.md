@@ -42,15 +42,22 @@ key: UID:API-KEY
 ```bash
 git clone https://github.com/brunomartinsmv/era5-daily-statistics-data-download.git
 cd era5-daily-statistics-data-download
+
+# Option A: Install dependencies only
 pip install -r requirements.txt
+
+# Option B: Install as editable package (provides 'era5-download' command)
+pip install -e .
 ```
 
 ## Usage
 
-The main script is [download_era5_daily.py](download_era5_daily.py):
+The main script is [download_era5_daily.py](download_era5_daily.py) (or `era5-download` if installed):
 
 ```bash
 python3 download_era5_daily.py <preset> --start-year YEAR --end-year YEAR [OPTIONS]
+# or:
+era5-download <preset> --start-year YEAR --end-year YEAR [OPTIONS]
 ```
 
 Available presets:
@@ -118,11 +125,35 @@ Dry-run hourly single-level data:
 python3 download_era5_daily.py single-levels \
     --start-year 2020 \
     --end-year 2020 \
-    --area -15.0 -56.5 -16.5 -55.5 \
+    --start-month 6 \
+    --end-month 8 \
     --dry-run
 ```
 
-Dry-run model levels:
+Dry-run ERA5-Land data by month:
+
+```bash
+python3 download_era5_daily.py land \
+    --start-year 2020 \
+    --end-year 2020 \
+    --start-month 1 \
+    --end-month 2 \
+    --dry-run
+```
+
+Dry-run pressure levels:
+
+```bash
+python3 download_era5_daily.py pressure-levels \
+    --start-year 2020 \
+    --end-year 2020 \
+    --start-month 1 \
+    --end-month 1 \
+    --pressure-levels 850 700 500 \
+    --dry-run
+```
+
+Dry-run model levels with monthly chunks:
 
 ```bash
 python3 download_era5_daily.py model-levels \
@@ -130,23 +161,8 @@ python3 download_era5_daily.py model-levels \
     --end-year 2020 \
     --start-month 1 \
     --end-month 1 \
+    --chunk month \
     --dry-run
-```
-
-Additional runnable examples live in [examples/](examples/).
-
-## Python API
-
-```python
-from download_era5_daily import download_era5_daily_stats
-
-download_era5_daily_stats(
-    variables=["2m_temperature"],
-    year_start=2020,
-    year_end=2023,
-    daily_statistic="daily_mean",
-    output_file="temperature_data.nc",
-)
 ```
 
 See [examples/daily_statistics_examples.py](examples/daily_statistics_examples.py)
@@ -173,8 +189,9 @@ python3 scripts/download_era5_temperature_regime_vars.py --start-year 2020 --end
 ## Output Format
 
 Daily-statistics downloads are saved as NetCDF (`.nc`) by default. Hourly ERA5
-product downloads are saved as ZIP files containing GRIB by default. These
-formats can be read with:
+product downloads are saved as ZIP files containing GRIB by default. Downloads
+use atomic writing (`.part` temporary file renamed on completion) to prevent partial
+or corrupted files if a download is interrupted. These formats can be read with:
 
 - Python: `xarray`, `netCDF4`, `pandas`
 - R: `ncdf4`, `raster`
@@ -210,8 +227,9 @@ Run the unittest suite without CDS credentials or network access:
 python3 -m unittest discover -s tests -v
 ```
 
-The tests exercise argument parsing, request construction, and `--dry-run` flows
-for the main entrypoint and auxiliary scripts.
+The tests exercise argument parsing, request construction, deterministic output
+naming, atomic downloads, and `--dry-run` flows for the main entrypoint and
+auxiliary scripts.
 
 ## Troubleshooting
 
@@ -252,6 +270,7 @@ for the main entrypoint and auxiliary scripts.
 │   ├── download_era5_model_levels.py
 │   └── download_era5_temperature_regime_vars.py
 ├── download_era5_daily.py         # Main public entrypoint
+├── pyproject.toml                # Project packaging and build configuration
 ├── requirements.txt
 ├── tests/                         # Unittest suite (no CDS credentials required)
 │   └── test_download_era5_daily.py
@@ -268,10 +287,3 @@ The download scripts in this repository are released under the
 
 ERA5 data obtained through the Copernicus Climate Data Store is subject to the
 [Copernicus License](https://cds.climate.copernicus.eu/disclaimer-privacy).
-
-## Resources
-
-- [CDS API Documentation](https://cds.climate.copernicus.eu/how-to-api)
-- [ERA5 Daily Statistics Dataset](https://cds.climate.copernicus.eu/datasets/derived-era5-single-levels-daily-statistics)
-- [ERA5 Documentation](https://confluence.ecmwf.int/display/CKB/ERA5)
-- [cdsapi Python Package](https://pypi.org/project/cdsapi/)

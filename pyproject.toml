@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "era5-daily-statistics-data-download"
+version = "2.1.0"
+description = "Tools to download ERA5 climate data from the Copernicus Climate Data Store (CDS)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Bruno Martins"}
+]
+keywords = ["climate", "copernicus", "era5", "weather", "reanalysis", "cds"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+dependencies = [
+    "cdsapi>=0.6.1",
+]
+
+[project.scripts]
+era5-download = "download_era5_daily:main"
+
+[project.urls]
+Homepage = "https://github.com/brunomartinsmv/era5-daily-statistics-data-download"
+Repository = "https://github.com/brunomartinsmv/era5-daily-statistics-data-download"
+
+[tool.setuptools]
+py-modules = ["download_era5_daily"]

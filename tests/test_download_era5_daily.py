@@ -6,9 +6,11 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -69,6 +71,255 @@ class BuildRequestTests(unittest.TestCase):
         self.assertNotIn("area", targets[0].request)
 
 
+class OutputPathTests(unittest.TestCase):
+    def test_hourly_year_chunk_partial_months_includes_suffix(self) -> None:
+        args = era5.argparse.Namespace(
+            start_year=2020,
+            end_year=2021,
+            start_month=11,
+            end_month=2,
+            variables=["2m_temperature"],
+            area=None,
+            format="grib",
+            download_format="zip",
+            chunk="year",
+            output_dir="downloads",
+        )
+        targets = era5.build_hourly_targets(args, "single-levels", era5.DATASET_SINGLE_LEVELS)
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(targets[0].output.name, "era5_single-levels_2020_11-12.zip")
+        self.assertEqual(targets[1].output.name, "era5_single-levels_2021_01-02.zip")
+    def test_single_year_deterministic_name(self) -> None:
+        args = era5.argparse.Namespace(
+            output=None,
+            start_year=2020,
+            end_year=2020,
+            statistic="daily_mean",
+            output_dir="downloads",
+        )
+        path = era5._single_output_path(args, "era5_daily_statistics", "nc")
+        self.assertEqual(path, Path("downloads/era5_daily_statistics_2020.nc"))
+
+    def test_multi_year_deterministic_name(self) -> None:
+        args = era5.argparse.Namespace(
+            output=None,
+            start_year=2020,
+            end_year=2023,
+            statistic="daily_mean",
+            output_dir="downloads",
+        )
+        path = era5._single_output_path(args, "era5_daily_statistics", "nc")
+        self.assertEqual(path, Path("downloads/era5_daily_statistics_2020_2023.nc"))
+
+    def test_custom_statistic_included_in_name(self) -> None:
+        args = era5.argparse.Namespace(
+            output=None,
+            start_year=2020,
+            end_year=2020,
+            statistic="daily_maximum",
+            output_dir="downloads",
+        )
+        path = era5._single_output_path(args, "era5_daily_statistics", "nc")
+        self.assertEqual(path, Path("downloads/era5_daily_statistics_2020_daily_maximum.nc"))
+
+    def test_differentiates_variables_in_filename(self) -> None:
+        args_temp = era5.argparse.Namespace(
+            output=None,
+            start_year=2020,
+            end_year=2020,
+            variables=["2m_temperature"],
+            statistic="daily_mean",
+            time_zone="utc+00:00",
+            frequency="1_hourly",
+            months=None,
+            area=None,
+            output_dir="downloads",
+        )
+        args_press = era5.argparse.Namespace(
+            output=None,
+            start_year=2020,
+            end_year=2020,
+            variables=["surface_pressure"],
+            statistic="daily_mean",
+            time_zone="utc+00:00",
+            frequency="1_hourly",
+            months=None,
+            area=None,
+            output_dir="downloads",
+        )
+        targets_temp = era5.build_daily_statistics_target(args_temp)
+        targets_press = era5.build_daily_statistics_target(args_press)
+        self.assertNotEqual(targets_temp[0].output, targets_press[0].output)
+        self.assertTrue(targets_temp[0].output.name.startswith("era5_daily_statistics_2020_2m_temperature_"))
+        self.assertTrue(targets_press[0].output.name.startswith("era5_daily_statistics_2020_surface_pressure_"))
+
+    def test_differentiates_frequency_and_timezone(self) -> None:
+        args_1h = era5.argparse.Namespace(
+            variables=["2m_temperature"],
+            start_year=2020,
+            end_year=2020,
+            months=None,
+            statistic="daily_mean",
+            time_zone="utc+00:00",
+            frequency="1_hourly",
+            output=None,
+            output_dir="downloads",
+            area=None,
+        )
+        args_3h = era5.argparse.Namespace(
+            variables=["2m_temperature"],
+            start_year=2020,
+            end_year=2020,
+            months=None,
+            statistic="daily_mean",
+            time_zone="utc+00:00",
+            frequency="3_hourly",
+            output=None,
+            output_dir="downloads",
+            area=None,
+        )
+        t_1h = era5.build_daily_statistics_target(args_1h)
+        t_3h = era5.build_daily_statistics_target(args_3h)
+        self.assertNotEqual(t_1h[0].output, t_3h[0].output)
+
+    def test_explicit_output_preserved(self) -> None:
+        args = era5.argparse.Namespace(
+            output="custom/path/data.nc",
+            start_year=2020,
+            end_year=2020,
+            statistic="daily_mean",
+            output_dir="downloads",
+        )
+        path = era5._single_output_path(args, "era5_daily_statistics", "nc")
+        self.assertEqual(path, Path("custom/path/data.nc"))
+
+
+class MonthValidationTests(unittest.TestCase):
+    def test_valid_month_range_same_year(self) -> None:
+        era5._validate_months(1, 12, 2020, 2020)
+        era5._validate_months(6, 8, 2020, 2020)
+
+    def test_invalid_month_out_of_range(self) -> None:
+        with self.assertRaises(SystemExit):
+            era5._validate_months(0, 12, 2020, 2020)
+        with self.assertRaises(SystemExit):
+            era5._validate_months(1, 13, 2020, 2020)
+
+    def test_inverted_months_same_year_fails(self) -> None:
+        with self.assertRaises(SystemExit):
+            era5._validate_months(11, 2, 2020, 2020)
+
+    def test_inverted_months_multi_year_allowed(self) -> None:
+        era5._validate_months(11, 2, 2020, 2021)
+
+
+class AtomicDownloadTests(unittest.TestCase):
+    def test_successful_atomic_download_renames_part_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            target = era5.DownloadTarget(
+                label="test_ok",
+                request={"var": "2m_temperature"},
+                output=dest,
+            )
+
+            mock_client = MagicMock()
+            def fake_download(path_str: str) -> None:
+                p = Path(path_str)
+                self.assertTrue(p.name.endswith(".part"))
+                self.assertIn("output.nc.", p.name)
+                p.write_text("data")
+
+            mock_client.retrieve.return_value.download.side_effect = fake_download
+            mock_cdsapi = MagicMock()
+            mock_cdsapi.Client.return_value = mock_client
+
+            with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                code = era5.retrieve_targets("dummy-dataset", [target], overwrite=True, sleep_seconds=0)
+
+            self.assertEqual(code, 0)
+            self.assertTrue(dest.exists())
+            self.assertEqual(dest.read_text(), "data")
+            remaining_part_files = list(Path(tmpdir).glob("*.part"))
+            self.assertEqual(len(remaining_part_files), 0)
+
+    def test_failed_download_cleans_up_part_file_without_corrupting_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            target = era5.DownloadTarget(
+                label="test_fail",
+                request={"var": "2m_temperature"},
+                output=dest,
+            )
+
+            mock_client = MagicMock()
+            def failing_download(path_str: str) -> None:
+                p = Path(path_str)
+                p.write_text("partial corrupt data")
+                raise RuntimeError("CDS network error")
+
+            mock_client.retrieve.return_value.download.side_effect = failing_download
+            mock_cdsapi = MagicMock()
+            mock_cdsapi.Client.return_value = mock_client
+
+            with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                code = era5.retrieve_targets("dummy-dataset", [target], overwrite=True, sleep_seconds=0)
+
+            self.assertEqual(code, 1)
+            self.assertFalse(dest.exists())
+            remaining_part_files = list(Path(tmpdir).glob("*.part"))
+            self.assertEqual(len(remaining_part_files), 0)
+
+    def test_interrupted_download_cleans_up_staging_file_and_reraises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            target = era5.DownloadTarget(
+                label="test_cancel",
+                request={"var": "2m_temperature"},
+                output=dest,
+            )
+
+            mock_client = MagicMock()
+            def interrupted_download(path_str: str) -> None:
+                p = Path(path_str)
+                p.write_text("interrupted partial data")
+                raise KeyboardInterrupt("Simulated Ctrl-C")
+
+            mock_client.retrieve.return_value.download.side_effect = interrupted_download
+            mock_cdsapi = MagicMock()
+            mock_cdsapi.Client.return_value = mock_client
+
+            with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                with self.assertRaises(KeyboardInterrupt):
+                    era5.retrieve_targets("dummy-dataset", [target], overwrite=True, sleep_seconds=0)
+
+            self.assertFalse(dest.exists())
+            remaining_part_files = list(Path(tmpdir).glob("*.part"))
+            self.assertEqual(len(remaining_part_files), 0)
+
+    def test_concurrent_downloads_use_unique_part_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            target1 = era5.DownloadTarget(label="t1", request={}, output=dest)
+            target2 = era5.DownloadTarget(label="t2", request={}, output=dest)
+
+            observed_part_paths: list[str] = []
+            mock_client = MagicMock()
+            def record_download(path_str: str) -> None:
+                observed_part_paths.append(path_str)
+                Path(path_str).write_text("dummy")
+
+            mock_client.retrieve.return_value.download.side_effect = record_download
+            mock_cdsapi = MagicMock()
+            mock_cdsapi.Client.return_value = mock_client
+
+            with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                era5.retrieve_targets("dummy", [target1, target2], overwrite=True, sleep_seconds=0)
+
+            self.assertEqual(len(observed_part_paths), 2)
+            self.assertNotEqual(observed_part_paths[0], observed_part_paths[1])
+
+
 class ModelLevelTargetTests(unittest.TestCase):
     def test_custom_output_prefix(self) -> None:
         args = era5.argparse.Namespace(
@@ -110,6 +361,41 @@ class TemperatureRegimeScriptTests(unittest.TestCase):
         year, months, _path = targets[0]
         self.assertEqual(year, 2020)
         self.assertEqual(months, ["06", "07", "08"])
+
+    def test_overwrite_failure_does_not_report_old_file_as_generated(self) -> None:
+        from scripts.download_era5_temperature_regime_vars import download_kind
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from scripts import download_era5_temperature_regime_vars as tr
+
+            old_output = Path(tmpdir) / "era5_cuiaba_temperature_regime_single_levels_2020.zip"
+            old_output.write_text("old data")
+
+            orig_dir = tr.DATASETS["single-levels"]["output_dir"]
+            try:
+                tr.DATASETS["single-levels"]["output_dir"] = Path(tmpdir)
+                mock_client = MagicMock()
+                mock_client.retrieve.return_value.download.side_effect = RuntimeError("Failed")
+                mock_cdsapi = MagicMock()
+                mock_cdsapi.Client.return_value = mock_client
+
+                with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                    generated, failures = download_kind(
+                        kind="single-levels",
+                        year_start=2020,
+                        year_end=2020,
+                        month_start=1,
+                        month_end=12,
+                        chunk_mode="year",
+                        dry_run=False,
+                        sleep_seconds=0,
+                        overwrite=True,
+                    )
+
+                self.assertEqual(generated, [])
+                self.assertEqual(len(failures), 1)
+            finally:
+                tr.DATASETS["single-levels"]["output_dir"] = orig_dir
 
 
 class CliDryRunTests(unittest.TestCase):

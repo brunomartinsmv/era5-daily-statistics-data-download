@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import hashlib
 import json
+import os
 import sys
 import time
+import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -105,12 +107,17 @@ def _validate_years(start_year: int, end_year: int, minimum_year: int = 1940) ->
         raise SystemExit("--start-year must be less than or equal to --end-year")
 
 
-def _validate_months(start_month: int, end_month: int) -> None:
+def _validate_months(
+    start_month: int,
+    end_month: int,
+    start_year: int | None = None,
+    end_year: int | None = None,
+) -> None:
     if not 1 <= start_month <= 12:
         raise SystemExit("--start-month must be between 1 and 12")
     if not 1 <= end_month <= 12:
         raise SystemExit("--end-month must be between 1 and 12")
-    if start_month > end_month:
+    if (start_year is None or end_year is None or start_year == end_year) and start_month > end_month:
         raise SystemExit("--start-month must be less than or equal to --end-month")
 
 
@@ -140,12 +147,48 @@ def _default_output(prefix: str, suffix: str, extension: str, output_dir: Path) 
     return output_dir / f"{prefix}_{suffix}.{extension}"
 
 
-def _single_output_path(args: argparse.Namespace, prefix: str, extension: str) -> Path:
+def _single_output_path(
+    args: argparse.Namespace,
+    prefix: str,
+    extension: str,
+    request: dict[str, Any] | None = None,
+) -> Path:
     if args.output:
         return Path(args.output)
-    suffix = f"{args.start_year}_{args.end_year}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    return _default_output(prefix, suffix, extension, Path(args.output_dir))
+    year_part = f"{args.start_year}" if args.start_year == args.end_year else f"{args.start_year}_{args.end_year}"
+    stat = getattr(args, "statistic", None)
+    stat_part = f"_{stat}" if stat and stat != "daily_mean" else ""
 
+    variables = getattr(args, "variables", None)
+    if variables:
+        if len(variables) <= 2:
+            var_part = f"_{'_'.join(variables)}"
+        else:
+            var_part = f"_{len(variables)}vars"
+    else:
+        var_part = ""
+
+    months = getattr(args, "months", None)
+    if months and len(months) < 12:
+        month_part = f"_m{'-'.join(sorted(months))}"
+    else:
+        month_part = ""
+
+    area = getattr(args, "area", None)
+    if area is not None:
+        area_slug = "_".join(f"{v:g}" for v in area)
+        area_part = f"_area_{area_slug}"
+    else:
+        area_part = ""
+
+    if request:
+        req_serialized = json.dumps(request, sort_keys=True, ensure_ascii=False)
+        req_hash = f"_{hashlib.sha256(req_serialized.encode()).hexdigest()[:8]}"
+    else:
+        req_hash = ""
+
+    suffix = f"{year_part}{stat_part}{var_part}{month_part}{area_part}{req_hash}"
+    return _default_output(prefix, suffix, extension, Path(args.output_dir))
 
 def build_daily_statistics_target(args: argparse.Namespace) -> list[DownloadTarget]:
     _validate_years(args.start_year, args.end_year)
@@ -163,7 +206,7 @@ def build_daily_statistics_target(args: argparse.Namespace) -> list[DownloadTarg
     }
     if args.area:
         request["area"] = args.area
-    output = _single_output_path(args, "era5_daily_statistics", "nc")
+    output = _single_output_path(args, "era5_daily_statistics", "nc", request=request)
     return [DownloadTarget("daily-statistics", request, output)]
 
 
@@ -214,7 +257,7 @@ def _hourly_output_extension(format_name: str, download_format: str) -> str:
 
 def build_hourly_targets(args: argparse.Namespace, preset: str, dataset: str) -> list[DownloadTarget]:
     _validate_years(args.start_year, args.end_year)
-    _validate_months(args.start_month, args.end_month)
+    _validate_months(args.start_month, args.end_month, args.start_year, args.end_year)
     _validate_area(args.area)
     variables = args.variables or PRESET_VARIABLES[preset]
     extension = _hourly_output_extension(args.format, args.download_format)
@@ -224,8 +267,10 @@ def build_hourly_targets(args: argparse.Namespace, preset: str, dataset: str) ->
         months = list(_target_months_for_year(year, args.start_year, args.end_year, args.start_month, args.end_month))
         if args.chunk == "year":
             month_values = [f"{month:02d}" for month in months]
-            label = f"{year}"
-            suffix = f"{preset}_{year}"
+            is_full_year = len(month_values) == 12
+            month_suffix = "" if is_full_year else f"_{month_values[0]}-{month_values[-1]}"
+            label = f"{year}" if is_full_year else f"{year}_{month_values[0]}-{month_values[-1]}"
+            suffix = f"{preset}_{year}{month_suffix}"
             targets.append(
                 DownloadTarget(
                     label=label,
@@ -277,7 +322,7 @@ def _build_hourly_request(
 
 def build_model_level_targets(args: argparse.Namespace) -> list[DownloadTarget]:
     _validate_years(args.start_year, args.end_year)
-    _validate_months(args.start_month, args.end_month)
+    _validate_months(args.start_month, args.end_month, args.start_year, args.end_year)
     _validate_area(args.area)
     variables = args.variables or PRESET_VARIABLES["model-levels"]
     extension = "nc" if args.format == "netcdf" else "grib"
@@ -338,7 +383,13 @@ def print_dry_run(dataset: str, targets: list[DownloadTarget], overwrite: bool) 
         print(json.dumps(targets[0].request, indent=2, ensure_ascii=False))
 
 
-def retrieve_targets(dataset: str, targets: list[DownloadTarget], overwrite: bool, sleep_seconds: int) -> int:
+def retrieve_targets(
+    dataset: str,
+    targets: list[DownloadTarget],
+    overwrite: bool,
+    sleep_seconds: int,
+    successful_targets: list[DownloadTarget] | None = None,
+) -> int:
     try:
         import cdsapi
     except Exception as exc:
@@ -354,13 +405,28 @@ def retrieve_targets(dataset: str, targets: list[DownloadTarget], overwrite: boo
 
     for index, target in enumerate(targets_to_download):
         target.output.parent.mkdir(parents=True, exist_ok=True)
+        run_id = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        part_output = target.output.with_name(f"{target.output.name}.{run_id}.part")
         print(f"[{target.label}] downloading -> {target.output}")
         try:
-            client.retrieve(dataset, target.request).download(str(target.output))
+            if part_output.exists():
+                part_output.unlink()
+            client.retrieve(dataset, target.request).download(str(part_output))
+            part_output.replace(target.output)
+            if successful_targets is not None:
+                successful_targets.append(target)
             print(f"[{target.label}] ok")
-        except Exception as exc:  # pragma: no cover - depends on CDS/network
-            failures.append(f"{target.label}: {exc}")
-            print(f"[{target.label}] error: {exc}", file=sys.stderr)
+        except BaseException as exc:  # Clean up staging file on failure or interruption
+            if part_output.exists():
+                try:
+                    part_output.unlink()
+                except OSError:
+                    pass
+            if isinstance(exc, Exception):
+                failures.append(f"{target.label}: {exc}")
+                print(f"[{target.label}] error: {exc}", file=sys.stderr)
+            else:
+                raise
 
         if index < len(targets_to_download) - 1 and sleep_seconds > 0:
             time.sleep(sleep_seconds)

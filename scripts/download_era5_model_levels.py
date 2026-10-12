@@ -86,7 +86,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def validate_args(args: argparse.Namespace) -> None:
     _validate_years(args.start_year, args.end_year)
-    _validate_months(args.start_month, args.end_month)
+    _validate_months(args.start_month, args.end_month, args.start_year, args.end_year)
     _validate_area(args.area)
     if args.sleep_seconds < 0:
         raise SystemExit("--sleep-seconds cannot be negative")
