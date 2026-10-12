@@ -72,6 +72,23 @@ class BuildRequestTests(unittest.TestCase):
 
 
 class OutputPathTests(unittest.TestCase):
+    def test_hourly_year_chunk_partial_months_includes_suffix(self) -> None:
+        args = era5.argparse.Namespace(
+            start_year=2020,
+            end_year=2021,
+            start_month=11,
+            end_month=2,
+            variables=["2m_temperature"],
+            area=None,
+            format="grib",
+            download_format="zip",
+            chunk="year",
+            output_dir="downloads",
+        )
+        targets = era5.build_hourly_targets(args, "single-levels", era5.DATASET_SINGLE_LEVELS)
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(targets[0].output.name, "era5_single-levels_2020_11-12.zip")
+        self.assertEqual(targets[1].output.name, "era5_single-levels_2021_01-02.zip")
     def test_single_year_deterministic_name(self) -> None:
         args = era5.argparse.Namespace(
             output=None,

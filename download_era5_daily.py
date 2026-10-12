@@ -267,8 +267,10 @@ def build_hourly_targets(args: argparse.Namespace, preset: str, dataset: str) ->
         months = list(_target_months_for_year(year, args.start_year, args.end_year, args.start_month, args.end_month))
         if args.chunk == "year":
             month_values = [f"{month:02d}" for month in months]
-            label = f"{year}"
-            suffix = f"{preset}_{year}"
+            is_full_year = len(month_values) == 12
+            month_suffix = "" if is_full_year else f"_{month_values[0]}-{month_values[-1]}"
+            label = f"{year}" if is_full_year else f"{year}_{month_values[0]}-{month_values[-1]}"
+            suffix = f"{preset}_{year}{month_suffix}"
             targets.append(
                 DownloadTarget(
                     label=label,
