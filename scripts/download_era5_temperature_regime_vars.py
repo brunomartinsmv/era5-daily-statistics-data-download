@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-import time
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from download_era5_daily import DownloadTarget, retrieve_targets  # noqa: E402
 
 YEAR_START = 2005
 YEAR_END = 2023
@@ -187,38 +189,22 @@ def download_kind(
             print(f"  [{year}][{_month_label(months)}] {target}")
         return [target for _, _, target in missing_targets], []
 
-    import cdsapi
-
-    client = cdsapi.Client()
-    generated: list[Path] = []
-    failures: list[str] = []
-
     if not missing_targets:
         print(f"[{kind}] Nothing to download. All expected files already exist.")
         return [target for _, _, target in existing_targets], []
 
-    last_index = len(missing_targets) - 1
+    download_targets = [
+        DownloadTarget(
+            label=f"{kind}:{year}:{_month_label(months)}",
+            request=build_request(kind, year, months),
+            output=target,
+        )
+        for year, months, target in missing_targets
+    ]
 
-    for index, (year, months, target) in enumerate(missing_targets):
-        request = build_request(kind, year, months)
-        month_label = _month_label(months)
-        print(f"[{kind}][{year}][{month_label}] Downloading...")
-        try:
-            client.retrieve(cfg["dataset"], request).download(str(target))
-            print(f"[{kind}][{year}][{month_label}] OK -> {target}")
-            generated.append(target)
-        except Exception as exc:
-            failures.append(f"{kind}:{year}:{month_label}: {exc}")
-            print(f"[{kind}][{year}][{month_label}] ERROR: {exc}", file=sys.stderr)
-
-        if index < last_index and sleep_seconds > 0:
-            time.sleep(sleep_seconds)
-
-    if failures:
-        print("\nFailures:", file=sys.stderr)
-        for failure in failures:
-            print(f"  - {failure}", file=sys.stderr)
-
+    ret = retrieve_targets(cfg["dataset"], download_targets, overwrite=overwrite, sleep_seconds=sleep_seconds)
+    generated = [t.output for t in download_targets if t.output.exists()]
+    failures = ["Download failed"] if ret != 0 else []
     return generated, failures
 
 

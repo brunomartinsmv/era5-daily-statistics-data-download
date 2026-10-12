@@ -14,7 +14,6 @@ import json
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -105,12 +104,17 @@ def _validate_years(start_year: int, end_year: int, minimum_year: int = 1940) ->
         raise SystemExit("--start-year must be less than or equal to --end-year")
 
 
-def _validate_months(start_month: int, end_month: int) -> None:
+def _validate_months(
+    start_month: int,
+    end_month: int,
+    start_year: int | None = None,
+    end_year: int | None = None,
+) -> None:
     if not 1 <= start_month <= 12:
         raise SystemExit("--start-month must be between 1 and 12")
     if not 1 <= end_month <= 12:
         raise SystemExit("--end-month must be between 1 and 12")
-    if start_month > end_month:
+    if (start_year is None or end_year is None or start_year == end_year) and start_month > end_month:
         raise SystemExit("--start-month must be less than or equal to --end-month")
 
 
@@ -143,7 +147,10 @@ def _default_output(prefix: str, suffix: str, extension: str, output_dir: Path) 
 def _single_output_path(args: argparse.Namespace, prefix: str, extension: str) -> Path:
     if args.output:
         return Path(args.output)
-    suffix = f"{args.start_year}_{args.end_year}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    year_part = f"{args.start_year}" if args.start_year == args.end_year else f"{args.start_year}_{args.end_year}"
+    stat = getattr(args, "statistic", None)
+    stat_part = f"_{stat}" if stat and stat != "daily_mean" else ""
+    suffix = f"{year_part}{stat_part}"
     return _default_output(prefix, suffix, extension, Path(args.output_dir))
 
 
@@ -214,7 +221,7 @@ def _hourly_output_extension(format_name: str, download_format: str) -> str:
 
 def build_hourly_targets(args: argparse.Namespace, preset: str, dataset: str) -> list[DownloadTarget]:
     _validate_years(args.start_year, args.end_year)
-    _validate_months(args.start_month, args.end_month)
+    _validate_months(args.start_month, args.end_month, args.start_year, args.end_year)
     _validate_area(args.area)
     variables = args.variables or PRESET_VARIABLES[preset]
     extension = _hourly_output_extension(args.format, args.download_format)
@@ -277,7 +284,7 @@ def _build_hourly_request(
 
 def build_model_level_targets(args: argparse.Namespace) -> list[DownloadTarget]:
     _validate_years(args.start_year, args.end_year)
-    _validate_months(args.start_month, args.end_month)
+    _validate_months(args.start_month, args.end_month, args.start_year, args.end_year)
     _validate_area(args.area)
     variables = args.variables or PRESET_VARIABLES["model-levels"]
     extension = "nc" if args.format == "netcdf" else "grib"
@@ -354,11 +361,20 @@ def retrieve_targets(dataset: str, targets: list[DownloadTarget], overwrite: boo
 
     for index, target in enumerate(targets_to_download):
         target.output.parent.mkdir(parents=True, exist_ok=True)
+        part_output = target.output.with_name(f"{target.output.name}.part")
         print(f"[{target.label}] downloading -> {target.output}")
         try:
-            client.retrieve(dataset, target.request).download(str(target.output))
+            if part_output.exists():
+                part_output.unlink()
+            client.retrieve(dataset, target.request).download(str(part_output))
+            part_output.replace(target.output)
             print(f"[{target.label}] ok")
         except Exception as exc:  # pragma: no cover - depends on CDS/network
+            if part_output.exists():
+                try:
+                    part_output.unlink()
+                except OSError:
+                    pass
             failures.append(f"{target.label}: {exc}")
             print(f"[{target.label}] error: {exc}", file=sys.stderr)
 

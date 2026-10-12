@@ -10,6 +10,26 @@ include a short summary and link here rather than duplicating the full changelog
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-12
+
+### Added
+
+- Standard Python packaging via `pyproject.toml` with console script entrypoint `era5-download`
+- GitHub Actions CI workflow in `.github/workflows/ci.yml` running unit tests on Python 3.9 through 3.13
+- Atomic downloads using `.part` temporary files to prevent corrupted or partial files on network interruption
+- Comprehensive unit tests covering atomic downloads, deterministic output filenames, and month validation
+
+### Changed
+
+- Made `daily-statistics` default output filename deterministic (`era5_daily_statistics_{start_year}_{end_year}.nc`), enabling reliable caching and idempotency
+- Refactored `scripts/download_era5_temperature_regime_vars.py` to reuse `DownloadTarget` and `retrieve_targets` from the core module
+- Allowed multi-year queries across seasonal month boundaries (e.g., `--start-month 11 --end-month 2`) in `_validate_months`
+
+### Fixed
+
+- Corrected nonexistent `actions/checkout@v6` in `.github/workflows/pullfrog.yml` to `actions/checkout@v4`
+- Added `*.part` temporary staging files to `.gitignore`
+
 ## [2.0.0] - 2026-07-12
 
 ### Added
@@ -58,10 +78,3 @@ include a short summary and link here rather than duplicating the full changelog
 
 - ERA5 daily statistics download from the Copernicus Climate Data Store (1940–present)
 - Command-line interface with support for multiple variables, temporal filtering, and spatial filtering
-- Comprehensive variable documentation for 27+ meteorological variables in `docs/variables_documentation/`
-- Example scripts and evapotranspiration analysis guide
-- Documentation organized under `docs/` with navigation README
-
-[Unreleased]: https://github.com/brunomartinsmv/era5-daily-statistics-data-download/compare/v2.0.0...HEAD
-[2.0.0]: https://github.com/brunomartinsmv/era5-daily-statistics-data-download/compare/v1.0.0...v2.0.0
-[1.0.0]: https://github.com/brunomartinsmv/era5-daily-statistics-data-download/releases/tag/v1.0.0
