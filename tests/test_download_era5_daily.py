@@ -111,6 +111,11 @@ class OutputPathTests(unittest.TestCase):
             start_year=2020,
             end_year=2020,
             variables=["2m_temperature"],
+            statistic="daily_mean",
+            time_zone="utc+00:00",
+            frequency="1_hourly",
+            months=None,
+            area=None,
             output_dir="downloads",
         )
         args_press = era5.argparse.Namespace(
@@ -118,13 +123,47 @@ class OutputPathTests(unittest.TestCase):
             start_year=2020,
             end_year=2020,
             variables=["surface_pressure"],
+            statistic="daily_mean",
+            time_zone="utc+00:00",
+            frequency="1_hourly",
+            months=None,
+            area=None,
             output_dir="downloads",
         )
-        path_temp = era5._single_output_path(args_temp, "era5_daily_statistics", "nc")
-        path_press = era5._single_output_path(args_press, "era5_daily_statistics", "nc")
-        self.assertNotEqual(path_temp, path_press)
-        self.assertEqual(path_temp, Path("downloads/era5_daily_statistics_2020_2m_temperature.nc"))
-        self.assertEqual(path_press, Path("downloads/era5_daily_statistics_2020_surface_pressure.nc"))
+        targets_temp = era5.build_daily_statistics_target(args_temp)
+        targets_press = era5.build_daily_statistics_target(args_press)
+        self.assertNotEqual(targets_temp[0].output, targets_press[0].output)
+        self.assertTrue(targets_temp[0].output.name.startswith("era5_daily_statistics_2020_2m_temperature_"))
+        self.assertTrue(targets_press[0].output.name.startswith("era5_daily_statistics_2020_surface_pressure_"))
+
+    def test_differentiates_frequency_and_timezone(self) -> None:
+        args_1h = era5.argparse.Namespace(
+            variables=["2m_temperature"],
+            start_year=2020,
+            end_year=2020,
+            months=None,
+            statistic="daily_mean",
+            time_zone="utc+00:00",
+            frequency="1_hourly",
+            output=None,
+            output_dir="downloads",
+            area=None,
+        )
+        args_3h = era5.argparse.Namespace(
+            variables=["2m_temperature"],
+            start_year=2020,
+            end_year=2020,
+            months=None,
+            statistic="daily_mean",
+            time_zone="utc+00:00",
+            frequency="3_hourly",
+            output=None,
+            output_dir="downloads",
+            area=None,
+        )
+        t_1h = era5.build_daily_statistics_target(args_1h)
+        t_3h = era5.build_daily_statistics_target(args_3h)
+        self.assertNotEqual(t_1h[0].output, t_3h[0].output)
 
     def test_explicit_output_preserved(self) -> None:
         args = era5.argparse.Namespace(
@@ -210,6 +249,33 @@ class AtomicDownloadTests(unittest.TestCase):
                 code = era5.retrieve_targets("dummy-dataset", [target], overwrite=True, sleep_seconds=0)
 
             self.assertEqual(code, 1)
+            self.assertFalse(dest.exists())
+            remaining_part_files = list(Path(tmpdir).glob("*.part"))
+            self.assertEqual(len(remaining_part_files), 0)
+
+    def test_interrupted_download_cleans_up_staging_file_and_reraises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            target = era5.DownloadTarget(
+                label="test_cancel",
+                request={"var": "2m_temperature"},
+                output=dest,
+            )
+
+            mock_client = MagicMock()
+            def interrupted_download(path_str: str) -> None:
+                p = Path(path_str)
+                p.write_text("interrupted partial data")
+                raise KeyboardInterrupt("Simulated Ctrl-C")
+
+            mock_client.retrieve.return_value.download.side_effect = interrupted_download
+            mock_cdsapi = MagicMock()
+            mock_cdsapi.Client.return_value = mock_client
+
+            with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                with self.assertRaises(KeyboardInterrupt):
+                    era5.retrieve_targets("dummy-dataset", [target], overwrite=True, sleep_seconds=0)
+
             self.assertFalse(dest.exists())
             remaining_part_files = list(Path(tmpdir).glob("*.part"))
             self.assertEqual(len(remaining_part_files), 0)

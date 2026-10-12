@@ -147,7 +147,12 @@ def _default_output(prefix: str, suffix: str, extension: str, output_dir: Path) 
     return output_dir / f"{prefix}_{suffix}.{extension}"
 
 
-def _single_output_path(args: argparse.Namespace, prefix: str, extension: str) -> Path:
+def _single_output_path(
+    args: argparse.Namespace,
+    prefix: str,
+    extension: str,
+    request: dict[str, Any] | None = None,
+) -> Path:
     if args.output:
         return Path(args.output)
     year_part = f"{args.start_year}" if args.start_year == args.end_year else f"{args.start_year}_{args.end_year}"
@@ -159,17 +164,13 @@ def _single_output_path(args: argparse.Namespace, prefix: str, extension: str) -
         if len(variables) <= 2:
             var_part = f"_{'_'.join(variables)}"
         else:
-            h = hashlib.sha256(",".join(sorted(variables)).encode()).hexdigest()[:8]
-            var_part = f"_{len(variables)}vars_{h}"
+            var_part = f"_{len(variables)}vars"
     else:
         var_part = ""
 
     months = getattr(args, "months", None)
     if months and len(months) < 12:
-        if len(months) <= 3:
-            month_part = f"_m{''.join(months)}"
-        else:
-            month_part = f"_{len(months)}months"
+        month_part = f"_m{'-'.join(sorted(months))}"
     else:
         month_part = ""
 
@@ -180,9 +181,14 @@ def _single_output_path(args: argparse.Namespace, prefix: str, extension: str) -
     else:
         area_part = ""
 
-    suffix = f"{year_part}{stat_part}{var_part}{month_part}{area_part}"
-    return _default_output(prefix, suffix, extension, Path(args.output_dir))
+    if request:
+        req_serialized = json.dumps(request, sort_keys=True, ensure_ascii=False)
+        req_hash = f"_{hashlib.sha256(req_serialized.encode()).hexdigest()[:8]}"
+    else:
+        req_hash = ""
 
+    suffix = f"{year_part}{stat_part}{var_part}{month_part}{area_part}{req_hash}"
+    return _default_output(prefix, suffix, extension, Path(args.output_dir))
 
 def build_daily_statistics_target(args: argparse.Namespace) -> list[DownloadTarget]:
     _validate_years(args.start_year, args.end_year)
@@ -200,7 +206,7 @@ def build_daily_statistics_target(args: argparse.Namespace) -> list[DownloadTarg
     }
     if args.area:
         request["area"] = args.area
-    output = _single_output_path(args, "era5_daily_statistics", "nc")
+    output = _single_output_path(args, "era5_daily_statistics", "nc", request=request)
     return [DownloadTarget("daily-statistics", request, output)]
 
 
@@ -408,14 +414,17 @@ def retrieve_targets(
             if successful_targets is not None:
                 successful_targets.append(target)
             print(f"[{target.label}] ok")
-        except Exception as exc:  # pragma: no cover - depends on CDS/network
+        except BaseException as exc:  # Clean up staging file on failure or interruption
             if part_output.exists():
                 try:
                     part_output.unlink()
                 except OSError:
                     pass
-            failures.append(f"{target.label}: {exc}")
-            print(f"[{target.label}] error: {exc}", file=sys.stderr)
+            if isinstance(exc, Exception):
+                failures.append(f"{target.label}: {exc}")
+                print(f"[{target.label}] error: {exc}", file=sys.stderr)
+            else:
+                raise
 
         if index < len(targets_to_download) - 1 and sleep_seconds > 0:
             time.sleep(sleep_seconds)
