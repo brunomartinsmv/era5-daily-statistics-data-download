@@ -105,6 +105,27 @@ class OutputPathTests(unittest.TestCase):
         path = era5._single_output_path(args, "era5_daily_statistics", "nc")
         self.assertEqual(path, Path("downloads/era5_daily_statistics_2020_daily_maximum.nc"))
 
+    def test_differentiates_variables_in_filename(self) -> None:
+        args_temp = era5.argparse.Namespace(
+            output=None,
+            start_year=2020,
+            end_year=2020,
+            variables=["2m_temperature"],
+            output_dir="downloads",
+        )
+        args_press = era5.argparse.Namespace(
+            output=None,
+            start_year=2020,
+            end_year=2020,
+            variables=["surface_pressure"],
+            output_dir="downloads",
+        )
+        path_temp = era5._single_output_path(args_temp, "era5_daily_statistics", "nc")
+        path_press = era5._single_output_path(args_press, "era5_daily_statistics", "nc")
+        self.assertNotEqual(path_temp, path_press)
+        self.assertEqual(path_temp, Path("downloads/era5_daily_statistics_2020_2m_temperature.nc"))
+        self.assertEqual(path_press, Path("downloads/era5_daily_statistics_2020_surface_pressure.nc"))
+
     def test_explicit_output_preserved(self) -> None:
         args = era5.argparse.Namespace(
             output="custom/path/data.nc",
@@ -150,6 +171,7 @@ class AtomicDownloadTests(unittest.TestCase):
             def fake_download(path_str: str) -> None:
                 p = Path(path_str)
                 self.assertTrue(p.name.endswith(".part"))
+                self.assertIn("output.nc.", p.name)
                 p.write_text("data")
 
             mock_client.retrieve.return_value.download.side_effect = fake_download
@@ -162,7 +184,8 @@ class AtomicDownloadTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertTrue(dest.exists())
             self.assertEqual(dest.read_text(), "data")
-            self.assertFalse(dest.with_name("output.nc.part").exists())
+            remaining_part_files = list(Path(tmpdir).glob("*.part"))
+            self.assertEqual(len(remaining_part_files), 0)
 
     def test_failed_download_cleans_up_part_file_without_corrupting_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -188,7 +211,30 @@ class AtomicDownloadTests(unittest.TestCase):
 
             self.assertEqual(code, 1)
             self.assertFalse(dest.exists())
-            self.assertFalse(dest.with_name("output.nc.part").exists())
+            remaining_part_files = list(Path(tmpdir).glob("*.part"))
+            self.assertEqual(len(remaining_part_files), 0)
+
+    def test_concurrent_downloads_use_unique_part_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            target1 = era5.DownloadTarget(label="t1", request={}, output=dest)
+            target2 = era5.DownloadTarget(label="t2", request={}, output=dest)
+
+            observed_part_paths: list[str] = []
+            mock_client = MagicMock()
+            def record_download(path_str: str) -> None:
+                observed_part_paths.append(path_str)
+                Path(path_str).write_text("dummy")
+
+            mock_client.retrieve.return_value.download.side_effect = record_download
+            mock_cdsapi = MagicMock()
+            mock_cdsapi.Client.return_value = mock_client
+
+            with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                era5.retrieve_targets("dummy", [target1, target2], overwrite=True, sleep_seconds=0)
+
+            self.assertEqual(len(observed_part_paths), 2)
+            self.assertNotEqual(observed_part_paths[0], observed_part_paths[1])
 
 
 class ModelLevelTargetTests(unittest.TestCase):
@@ -232,6 +278,41 @@ class TemperatureRegimeScriptTests(unittest.TestCase):
         year, months, _path = targets[0]
         self.assertEqual(year, 2020)
         self.assertEqual(months, ["06", "07", "08"])
+
+    def test_overwrite_failure_does_not_report_old_file_as_generated(self) -> None:
+        from scripts.download_era5_temperature_regime_vars import download_kind
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from scripts import download_era5_temperature_regime_vars as tr
+
+            old_output = Path(tmpdir) / "era5_cuiaba_temperature_regime_single_levels_2020.zip"
+            old_output.write_text("old data")
+
+            orig_dir = tr.DATASETS["single-levels"]["output_dir"]
+            try:
+                tr.DATASETS["single-levels"]["output_dir"] = Path(tmpdir)
+                mock_client = MagicMock()
+                mock_client.retrieve.return_value.download.side_effect = RuntimeError("Failed")
+                mock_cdsapi = MagicMock()
+                mock_cdsapi.Client.return_value = mock_client
+
+                with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                    generated, failures = download_kind(
+                        kind="single-levels",
+                        year_start=2020,
+                        year_end=2020,
+                        month_start=1,
+                        month_end=12,
+                        chunk_mode="year",
+                        dry_run=False,
+                        sleep_seconds=0,
+                        overwrite=True,
+                    )
+
+                self.assertEqual(generated, [])
+                self.assertEqual(len(failures), 1)
+            finally:
+                tr.DATASETS["single-levels"]["output_dir"] = orig_dir
 
 
 class CliDryRunTests(unittest.TestCase):

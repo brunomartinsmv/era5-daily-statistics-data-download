@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import hashlib
 import json
+import os
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -150,7 +153,34 @@ def _single_output_path(args: argparse.Namespace, prefix: str, extension: str) -
     year_part = f"{args.start_year}" if args.start_year == args.end_year else f"{args.start_year}_{args.end_year}"
     stat = getattr(args, "statistic", None)
     stat_part = f"_{stat}" if stat and stat != "daily_mean" else ""
-    suffix = f"{year_part}{stat_part}"
+
+    variables = getattr(args, "variables", None)
+    if variables:
+        if len(variables) <= 2:
+            var_part = f"_{'_'.join(variables)}"
+        else:
+            h = hashlib.sha256(",".join(sorted(variables)).encode()).hexdigest()[:8]
+            var_part = f"_{len(variables)}vars_{h}"
+    else:
+        var_part = ""
+
+    months = getattr(args, "months", None)
+    if months and len(months) < 12:
+        if len(months) <= 3:
+            month_part = f"_m{''.join(months)}"
+        else:
+            month_part = f"_{len(months)}months"
+    else:
+        month_part = ""
+
+    area = getattr(args, "area", None)
+    if area is not None:
+        area_slug = "_".join(f"{v:g}" for v in area)
+        area_part = f"_area_{area_slug}"
+    else:
+        area_part = ""
+
+    suffix = f"{year_part}{stat_part}{var_part}{month_part}{area_part}"
     return _default_output(prefix, suffix, extension, Path(args.output_dir))
 
 
@@ -345,7 +375,13 @@ def print_dry_run(dataset: str, targets: list[DownloadTarget], overwrite: bool) 
         print(json.dumps(targets[0].request, indent=2, ensure_ascii=False))
 
 
-def retrieve_targets(dataset: str, targets: list[DownloadTarget], overwrite: bool, sleep_seconds: int) -> int:
+def retrieve_targets(
+    dataset: str,
+    targets: list[DownloadTarget],
+    overwrite: bool,
+    sleep_seconds: int,
+    successful_targets: list[DownloadTarget] | None = None,
+) -> int:
     try:
         import cdsapi
     except Exception as exc:
@@ -361,13 +397,16 @@ def retrieve_targets(dataset: str, targets: list[DownloadTarget], overwrite: boo
 
     for index, target in enumerate(targets_to_download):
         target.output.parent.mkdir(parents=True, exist_ok=True)
-        part_output = target.output.with_name(f"{target.output.name}.part")
+        run_id = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        part_output = target.output.with_name(f"{target.output.name}.{run_id}.part")
         print(f"[{target.label}] downloading -> {target.output}")
         try:
             if part_output.exists():
                 part_output.unlink()
             client.retrieve(dataset, target.request).download(str(part_output))
             part_output.replace(target.output)
+            if successful_targets is not None:
+                successful_targets.append(target)
             print(f"[{target.label}] ok")
         except Exception as exc:  # pragma: no cover - depends on CDS/network
             if part_output.exists():

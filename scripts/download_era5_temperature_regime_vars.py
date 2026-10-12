@@ -202,8 +202,15 @@ def download_kind(
         for year, months, target in missing_targets
     ]
 
-    ret = retrieve_targets(cfg["dataset"], download_targets, overwrite=overwrite, sleep_seconds=sleep_seconds)
-    generated = [t.output for t in download_targets if t.output.exists()]
+    succeeded_targets: list[DownloadTarget] = []
+    ret = retrieve_targets(
+        cfg["dataset"],
+        download_targets,
+        overwrite=overwrite,
+        sleep_seconds=sleep_seconds,
+        successful_targets=succeeded_targets,
+    )
+    generated = [t.output for t in succeeded_targets]
     failures = ["Download failed"] if ret != 0 else []
     return generated, failures
 
