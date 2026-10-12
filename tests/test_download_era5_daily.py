@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -107,8 +106,29 @@ class OutputPathTests(unittest.TestCase):
         )
         targets = era5.build_hourly_targets(args, "single-levels", era5.DATASET_SINGLE_LEVELS)
         self.assertEqual(len(targets), 2)
-        self.assertEqual(targets[0].output.name, "era5_single-levels_2020_11-12.zip")
-        self.assertEqual(targets[1].output.name, "era5_single-levels_2021_01-02.zip")
+        self.assertTrue(targets[0].output.name.startswith("era5_single-levels_2020_11-12_"))
+        self.assertTrue(targets[1].output.name.startswith("era5_single-levels_2021_01-02_"))
+        self.assertTrue(targets[0].output.name.endswith(".zip"))
+        self.assertIn(era5._request_fingerprint(targets[0].request), targets[0].output.name)
+        self.assertNotEqual(targets[0].output, targets[1].output)
+
+    def test_hourly_year_chunk_distinguishes_variables(self) -> None:
+        def build(variables: list[str]) -> Path:
+            args = era5.argparse.Namespace(
+                start_year=2020,
+                end_year=2020,
+                start_month=6,
+                end_month=8,
+                variables=variables,
+                area=None,
+                format="grib",
+                download_format="zip",
+                chunk="year",
+                output_dir="downloads",
+            )
+            return era5.build_hourly_targets(args, "single-levels", era5.DATASET_SINGLE_LEVELS)[0].output
+
+        self.assertNotEqual(build(["2m_temperature"]), build(["surface_pressure"]))
 
     def test_single_year_deterministic_name(self) -> None:
         args = _daily_args()
@@ -209,6 +229,20 @@ class OutputPathTests(unittest.TestCase):
         self.assertIn(era5._request_fingerprint(target.request), target.output.name)
         self.assertIn("area_-15_-56.5_-16.5_-55.5", target.output.name)
 
+    def test_variable_order_does_not_change_the_path(self) -> None:
+        forward = era5._single_output_path(
+            _daily_args(variables=["surface_pressure", "2m_temperature"]),
+            "era5_daily_statistics",
+            "nc",
+        )
+        reverse = era5._single_output_path(
+            _daily_args(variables=["2m_temperature", "surface_pressure"]),
+            "era5_daily_statistics",
+            "nc",
+        )
+        self.assertEqual(forward, reverse)
+        self.assertIn("2m_temperature_surface_pressure", forward.name)
+
 
 class MonthValidationTests(unittest.TestCase):
     def test_valid_month_range_same_year(self) -> None:
@@ -242,8 +276,10 @@ class AtomicDownloadTests(unittest.TestCase):
             mock_client = MagicMock()
             def fake_download(path_str: str) -> None:
                 p = Path(path_str)
+                self.assertTrue(p.name.startswith("part-"))
                 self.assertTrue(p.name.endswith(".part"))
-                self.assertIn("output.nc.", p.name)
+                self.assertLessEqual(len(p.name.encode("utf-8")), 80)
+                self.assertNotIn("output.nc", p.name)
                 p.write_text("data")
 
             mock_client.retrieve.return_value.download.side_effect = fake_download
@@ -257,7 +293,6 @@ class AtomicDownloadTests(unittest.TestCase):
             self.assertTrue(dest.exists())
             self.assertEqual(dest.read_text(), "data")
             self.assertEqual(list(Path(tmpdir).glob("*.part")), [])
-            self.assertEqual(list(Path(tmpdir).glob("*.lock")), [])
 
     def test_failed_download_cleans_up_part_file_without_corrupting_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -284,7 +319,6 @@ class AtomicDownloadTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertFalse(dest.exists())
             self.assertEqual(list(Path(tmpdir).glob("*.part")), [])
-            self.assertEqual(list(Path(tmpdir).glob("*.lock")), [])
 
     def test_keyboard_interrupt_removes_partial_file_and_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -311,7 +345,6 @@ class AtomicDownloadTests(unittest.TestCase):
 
             self.assertFalse(dest.exists())
             self.assertEqual(list(Path(tmpdir).glob("*.part")), [])
-            self.assertEqual(list(Path(tmpdir).glob("*.lock")), [])
 
             def complete(path_str: str) -> None:
                 Path(path_str).write_text("ok")
@@ -347,7 +380,6 @@ class AtomicDownloadTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(len(calls), 1)
             self.assertEqual(dest.read_text(), "payload-1")
-            self.assertEqual(list(Path(tmpdir).glob("*.lock")), [])
 
     def test_parallel_downloads_do_not_start_a_second_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -395,7 +427,6 @@ class AtomicDownloadTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(dest.read_text(), "payload")
             self.assertEqual(list(Path(tmpdir).glob("*.part")), [])
-            self.assertEqual(list(Path(tmpdir).glob("*.lock")), [])
 
     def test_output_lock_is_exclusive_across_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -427,27 +458,63 @@ class AtomicDownloadTests(unittest.TestCase):
             self.assertFalse(first.is_alive())
             self.assertFalse(second.is_alive())
             self.assertTrue(acquired_second.is_set())
-            self.assertFalse(era5._output_lock_path(dest).exists())
+            lock_path = era5._output_lock_path(dest)
+            self.assertTrue(lock_path.exists())
+            self.assertLessEqual(len(lock_path.name.encode("utf-8")), 64)
 
-    def test_stale_lock_from_a_dead_process_is_replaced(self) -> None:
+    def test_waiter_keeps_the_holders_lock_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             dest = Path(tmpdir) / "output.nc"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dead_pid = None
-            for candidate in range(1_000_000, 1_002_000):
-                try:
-                    os.kill(candidate, 0)
-                except ProcessLookupError:
-                    dead_pid = candidate
-                    break
-                except PermissionError:
-                    continue
-            self.assertIsNotNone(dead_pid)
             lock_path = era5._output_lock_path(dest)
-            lock_path.write_text(f"{dead_pid}-stale", encoding="ascii")
-            with era5._exclusive_output_lock(dest):
-                self.assertTrue(lock_path.read_text(encoding="ascii").startswith(f"{os.getpid()}-"))
-            self.assertFalse(lock_path.exists())
+            held = threading.Event()
+            release = threading.Event()
+            seen_inode: dict[str, int] = {}
+
+            def holder() -> None:
+                with era5._exclusive_output_lock(dest):
+                    seen_inode["value"] = lock_path.stat().st_ino
+                    held.set()
+                    self.assertTrue(release.wait(5))
+
+            def waiter() -> None:
+                self.assertTrue(held.wait(5))
+                self.assertEqual(lock_path.stat().st_ino, seen_inode["value"])
+                with era5._exclusive_output_lock(dest):
+                    self.assertEqual(lock_path.stat().st_ino, seen_inode["value"])
+
+            first = threading.Thread(target=holder, daemon=True)
+            second = threading.Thread(target=waiter, daemon=True)
+            first.start()
+            second.start()
+            self.assertTrue(held.wait(5))
+            time.sleep(0.1)
+            self.assertTrue(lock_path.exists())
+            self.assertEqual(lock_path.stat().st_ino, seen_inode["value"])
+            release.set()
+            first.join(5)
+            second.join(5)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+
+    def test_pid_text_in_a_lock_file_does_not_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / ("n" * 200 + ".nc")
+            lock_path = era5._output_lock_path(dest)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text("1-live-unrelated-process", encoding="ascii")
+            acquired = threading.Event()
+
+            def take() -> None:
+                with era5._exclusive_output_lock(dest):
+                    acquired.set()
+
+            thread = threading.Thread(target=take, daemon=True)
+            thread.start()
+            self.assertTrue(acquired.wait(2))
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+            self.assertLessEqual(len(lock_path.name.encode("utf-8")), 64)
+            self.assertLessEqual(len(era5._staging_path(dest).name.encode("utf-8")), 80)
 
     def test_interrupted_download_cleans_up_staging_file_and_reraises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -573,6 +640,8 @@ class TemperatureRegimeScriptTests(unittest.TestCase):
 
                 self.assertEqual(generated, [])
                 self.assertEqual(len(failures), 1)
+                self.assertIn("Failed", failures[0])
+                self.assertIn("single-levels:2020:01-12", failures[0])
             finally:
                 tr.DATASETS["single-levels"]["output_dir"] = orig_dir
 

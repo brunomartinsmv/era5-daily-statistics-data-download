@@ -149,7 +149,6 @@ def _default_output(prefix: str, suffix: str, extension: str, output_dir: Path) 
 
 
 _REQUEST_FINGERPRINT_HEX_CHARS = 10
-_EMPTY_LOCK_STALE_SECONDS = 5.0
 
 
 def _daily_statistics_request(args: argparse.Namespace) -> dict[str, Any]:
@@ -157,7 +156,7 @@ def _daily_statistics_request(args: argparse.Namespace) -> dict[str, Any]:
     variables = getattr(args, "variables", None) or PRESET_VARIABLES["daily-statistics"]
     request: dict[str, Any] = {
         "product_type": "reanalysis",
-        "variable": list(variables),
+        "variable": sorted(variables),
         "year": [str(year) for year in range(args.start_year, args.end_year + 1)],
         "month": _months_from_args(getattr(args, "months", None)),
         "daily_statistic": getattr(args, "statistic", None) or "daily_mean",
@@ -288,11 +287,12 @@ def build_hourly_targets(args: argparse.Namespace, preset: str, dataset: str) ->
             is_full_year = len(month_values) == 12
             month_suffix = "" if is_full_year else f"_{month_values[0]}-{month_values[-1]}"
             label = f"{year}" if is_full_year else f"{year}_{month_values[0]}-{month_values[-1]}"
-            suffix = f"{preset}_{year}{month_suffix}"
+            request = _build_hourly_request(args, dataset, variables, str(year), month_values)
+            suffix = f"{preset}_{year}{month_suffix}_{_request_fingerprint(request)}"
             targets.append(
                 DownloadTarget(
                     label=label,
-                    request=_build_hourly_request(args, dataset, variables, str(year), month_values),
+                    request=request,
                     output=_default_output("era5", suffix, extension, Path(args.output_dir)),
                 )
             )
@@ -301,11 +301,12 @@ def build_hourly_targets(args: argparse.Namespace, preset: str, dataset: str) ->
         for month in months:
             month_value = f"{month:02d}"
             label = f"{year}-{month_value}"
-            suffix = f"{preset}_{year}_{month_value}"
+            request = _build_hourly_request(args, dataset, variables, str(year), [month_value])
+            suffix = f"{preset}_{year}_{month_value}_{_request_fingerprint(request)}"
             targets.append(
                 DownloadTarget(
                     label=label,
-                    request=_build_hourly_request(args, dataset, variables, str(year), [month_value]),
+                    request=request,
                     output=_default_output("era5", suffix, extension, Path(args.output_dir)),
                 )
             )
@@ -321,7 +322,7 @@ def _build_hourly_request(
     months: list[str],
 ) -> dict[str, Any]:
     request: dict[str, Any] = {
-        "variable": variables,
+        "variable": sorted(variables),
         "year": year,
         "month": months,
         "day": DEFAULT_DAYS,
@@ -402,88 +403,76 @@ def print_dry_run(dataset: str, targets: list[DownloadTarget], overwrite: bool) 
 
 
 def _output_lock_path(output: Path) -> Path:
-    return output.with_name(f"{output.name}.lock")
+    """Stable short lock name in the destination directory.
+
+    The basename is a hash of the target name so a destination already near
+    NAME_MAX does not grow a ``.lock`` suffix past the filesystem limit.
+    """
+    digest = hashlib.sha256(output.name.encode("utf-8")).hexdigest()[:16]
+    return output.with_name(f"era5-{digest}.lock")
 
 
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+def _staging_path(output: Path) -> Path:
+    """Same-directory staging name that stays well under NAME_MAX."""
+    return output.with_name(f"part-{uuid.uuid4().hex}.part")
 
 
-def _lock_pid(token: str) -> int | None:
-    pid_text = token.split("-", 1)[0]
-    if not pid_text.isdigit():
-        return None
-    return int(pid_text)
+def _acquire_file_lock(fd: int) -> None:
+    """Block on a kernel lock released automatically when the holder exits.
 
+    Unix uses ``flock``. Windows uses ``msvcrt.locking``; ``os.kill(pid, 0)``
+    is not a liveness probe there because signal 0 terminates the process.
+    """
+    if sys.platform == "win32":
+        import msvcrt
 
-def _lock_is_stale(lock_path: Path, now: float | None = None) -> bool:
-    try:
-        token = lock_path.read_text(encoding="ascii").strip()
-        age = (time.time() if now is None else now) - lock_path.stat().st_mtime
-    except OSError:
-        return False
-    pid = _lock_pid(token)
-    if pid is None:
-        return age >= _EMPTY_LOCK_STALE_SECONDS
-    if pid == os.getpid():
-        return False
-    return not _pid_alive(pid)
-
-
-def _unlink_if_same_inode(path: Path, device: int, inode: int) -> None:
-    try:
-        current = path.stat()
-    except OSError:
+        os.lseek(fd, 0, os.SEEK_SET)
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
         return
-    if current.st_dev == device and current.st_ino == inode:
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _release_file_lock(fd: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
         try:
-            path.unlink()
-        except FileNotFoundError:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
             pass
+        return
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 @contextmanager
 def _exclusive_output_lock(output: Path) -> Iterator[None]:
-    """Block until this process exclusively owns ``output``.
+    """Block until this process holds the kernel lock for ``output``.
 
-    The lock file is removed on exit, including cancellation. A lock whose
-    owner pid is gone, or an empty lock older than a few seconds, is replaced.
+    The lock file is never unlinked. Deleting it after a stale check can
+    remove a replacement lock created by another live download. The kernel
+    drops the lock when every holder fd closes, including on crash, so a
+    leftover file does not stay owned by a reused PID.
     """
     lock_path = _output_lock_path(output)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    token = f"{os.getpid()}-{uuid.uuid4().hex}"
-    while True:
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            break
-        except FileExistsError:
-            if _lock_is_stale(lock_path):
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            time.sleep(0.05)
-    stat_result = os.fstat(fd)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    acquired = False
     try:
-        os.write(fd, token.encode("ascii"))
+        _acquire_file_lock(fd)
+        acquired = True
         yield
     finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        _unlink_if_same_inode(lock_path, stat_result.st_dev, stat_result.st_ino)
+        if acquired:
+            _release_file_lock(fd)
+        os.close(fd)
 
 
 def _discard_part_file(part_output: Path) -> None:
@@ -501,6 +490,7 @@ def retrieve_targets(
     overwrite: bool,
     sleep_seconds: int,
     successful_targets: list[DownloadTarget] | None = None,
+    failure_messages: list[str] | None = None,
 ) -> int:
     try:
         import cdsapi
@@ -508,7 +498,7 @@ def retrieve_targets(
         raise RuntimeError("cdsapi is required for downloads. Install requirements and configure ~/.cdsapirc.") from exc
 
     client = cdsapi.Client()
-    failures: list[str] = []
+    failures = failure_messages if failure_messages is not None else []
     targets_to_download = [target for target in targets if overwrite or not target.output.exists()]
 
     if not targets_to_download:
@@ -517,8 +507,7 @@ def retrieve_targets(
 
     for index, target in enumerate(targets_to_download):
         target.output.parent.mkdir(parents=True, exist_ok=True)
-        run_id = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
-        part_output = target.output.with_name(f"{target.output.name}.{run_id}.part")
+        part_output = _staging_path(target.output)
         attempted_download = False
         try:
             with _exclusive_output_lock(target.output):
