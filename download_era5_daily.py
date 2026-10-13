@@ -10,15 +10,17 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import errno
 import hashlib
 import json
 import os
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 DATASET_DAILY = "derived-era5-single-levels-daily-statistics"
@@ -147,66 +149,82 @@ def _default_output(prefix: str, suffix: str, extension: str, output_dir: Path) 
     return output_dir / f"{prefix}_{suffix}.{extension}"
 
 
-def _single_output_path(
-    args: argparse.Namespace,
-    prefix: str,
-    extension: str,
-    request: dict[str, Any] | None = None,
-) -> Path:
-    if args.output:
-        return Path(args.output)
-    year_part = f"{args.start_year}" if args.start_year == args.end_year else f"{args.start_year}_{args.end_year}"
-    stat = getattr(args, "statistic", None)
-    stat_part = f"_{stat}" if stat and stat != "daily_mean" else ""
+_REQUEST_FINGERPRINT_HEX_CHARS = 10
 
-    variables = getattr(args, "variables", None)
-    if variables:
-        if len(variables) <= 2:
-            var_part = f"_{'_'.join(variables)}"
-        else:
-            var_part = f"_{len(variables)}vars"
-    else:
-        var_part = ""
 
-    months = getattr(args, "months", None)
-    if months and len(months) < 12:
-        month_part = f"_m{'-'.join(sorted(months))}"
-    else:
-        month_part = ""
-
+def _daily_statistics_request(args: argparse.Namespace) -> dict[str, Any]:
+    """Canonical daily-statistics request. The default filename hashes this mapping."""
+    variables = getattr(args, "variables", None) or PRESET_VARIABLES["daily-statistics"]
+    request: dict[str, Any] = {
+        "product_type": "reanalysis",
+        "variable": sorted(variables),
+        "year": [str(year) for year in range(args.start_year, args.end_year + 1)],
+        "month": _months_from_args(getattr(args, "months", None)),
+        "daily_statistic": getattr(args, "statistic", None) or "daily_mean",
+        "time_zone": getattr(args, "time_zone", None) or "utc+00:00",
+        "frequency": getattr(args, "frequency", None) or "1_hourly",
+    }
     area = getattr(args, "area", None)
-    if area is not None:
-        area_slug = "_".join(f"{v:g}" for v in area)
-        area_part = f"_area_{area_slug}"
-    else:
-        area_part = ""
+    if area:
+        request["area"] = [float(value) for value in area]
+    return request
 
-    if request:
-        req_serialized = json.dumps(request, sort_keys=True, ensure_ascii=False)
-        req_hash = f"_{hashlib.sha256(req_serialized.encode()).hexdigest()[:8]}"
-    else:
-        req_hash = ""
 
-    suffix = f"{year_part}{stat_part}{var_part}{month_part}{area_part}{req_hash}"
+def _request_fingerprint(request: dict[str, Any]) -> str:
+    payload = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:_REQUEST_FINGERPRINT_HEX_CHARS]
+
+
+def _filename_token(value: str) -> str:
+    return "".join(char if char.isalnum() or char in "+-_" else "-" for char in value)
+
+
+def _variable_name_part(variables: list[str]) -> str:
+    if not variables:
+        return ""
+    if len(variables) <= 2:
+        return "_" + "_".join(_filename_token(variable) for variable in variables)
+    digest = hashlib.sha256(",".join(sorted(variables)).encode("utf-8")).hexdigest()[:8]
+    return f"_{len(variables)}vars_{digest}"
+
+
+def _month_name_part(months: list[str]) -> str:
+    if months == DEFAULT_MONTHS:
+        return ""
+    return "_m" + "-".join(months)
+
+
+def _area_name_part(area: list[float] | None) -> str:
+    if not area:
+        return ""
+    return "_area_" + "_".join(f"{value:g}" for value in area)
+
+
+def _single_output_path(args: argparse.Namespace, prefix: str, extension: str) -> Path:
+    if getattr(args, "output", None):
+        return Path(args.output)
+    request = _daily_statistics_request(args)
+    years = request["year"]
+    year_part = years[0] if len(years) == 1 else f"{years[0]}_{years[-1]}"
+    statistic = str(request["daily_statistic"])
+    stat_part = f"_{statistic}" if statistic != "daily_mean" else ""
+    suffix = (
+        f"{year_part}{stat_part}"
+        f"{_variable_name_part(list(request['variable']))}"
+        f"{_month_name_part(list(request['month']))}"
+        f"_{_filename_token(str(request['frequency']))}"
+        f"_{_filename_token(str(request['time_zone']))}"
+        f"{_area_name_part(request.get('area'))}"
+        f"_{_request_fingerprint(request)}"
+    )
     return _default_output(prefix, suffix, extension, Path(args.output_dir))
+
 
 def build_daily_statistics_target(args: argparse.Namespace) -> list[DownloadTarget]:
     _validate_years(args.start_year, args.end_year)
     _validate_area(args.area)
-    variables = args.variables or PRESET_VARIABLES["daily-statistics"]
-    months = _months_from_args(args.months)
-    request: dict[str, Any] = {
-        "product_type": "reanalysis",
-        "variable": variables,
-        "year": [str(year) for year in range(args.start_year, args.end_year + 1)],
-        "month": months,
-        "daily_statistic": args.statistic,
-        "time_zone": args.time_zone,
-        "frequency": args.frequency,
-    }
-    if args.area:
-        request["area"] = args.area
-    output = _single_output_path(args, "era5_daily_statistics", "nc", request=request)
+    request = _daily_statistics_request(args)
+    output = _single_output_path(args, "era5_daily_statistics", "nc")
     return [DownloadTarget("daily-statistics", request, output)]
 
 
@@ -270,11 +288,12 @@ def build_hourly_targets(args: argparse.Namespace, preset: str, dataset: str) ->
             is_full_year = len(month_values) == 12
             month_suffix = "" if is_full_year else f"_{month_values[0]}-{month_values[-1]}"
             label = f"{year}" if is_full_year else f"{year}_{month_values[0]}-{month_values[-1]}"
-            suffix = f"{preset}_{year}{month_suffix}"
+            request = _build_hourly_request(args, dataset, variables, str(year), month_values)
+            suffix = f"{preset}_{year}{month_suffix}_{_request_fingerprint(request)}"
             targets.append(
                 DownloadTarget(
                     label=label,
-                    request=_build_hourly_request(args, dataset, variables, str(year), month_values),
+                    request=request,
                     output=_default_output("era5", suffix, extension, Path(args.output_dir)),
                 )
             )
@@ -283,16 +302,33 @@ def build_hourly_targets(args: argparse.Namespace, preset: str, dataset: str) ->
         for month in months:
             month_value = f"{month:02d}"
             label = f"{year}-{month_value}"
-            suffix = f"{preset}_{year}_{month_value}"
+            request = _build_hourly_request(args, dataset, variables, str(year), [month_value])
+            suffix = f"{preset}_{year}_{month_value}_{_request_fingerprint(request)}"
             targets.append(
                 DownloadTarget(
                     label=label,
-                    request=_build_hourly_request(args, dataset, variables, str(year), [month_value]),
+                    request=request,
                     output=_default_output("era5", suffix, extension, Path(args.output_dir)),
                 )
             )
 
     return targets
+
+
+def _canonical_pressure_levels(levels: list[str]) -> list[str]:
+    """Numeric order so the same levels share one request hash and filename.
+
+    ``json.dumps`` keeps list order, and the default path embeds that hash.
+    ``1000`` sorts before ``850`` as text, so the key is the integer value.
+    """
+
+    def sort_key(level: str) -> tuple[int, int | str, str]:
+        try:
+            return (0, int(level), level)
+        except ValueError:
+            return (1, level, level)
+
+    return sorted(levels, key=sort_key)
 
 
 def _build_hourly_request(
@@ -303,7 +339,7 @@ def _build_hourly_request(
     months: list[str],
 ) -> dict[str, Any]:
     request: dict[str, Any] = {
-        "variable": variables,
+        "variable": sorted(variables),
         "year": year,
         "month": months,
         "day": DEFAULT_DAYS,
@@ -316,7 +352,7 @@ def _build_hourly_request(
     if dataset != DATASET_LAND:
         request["product_type"] = "reanalysis"
     if dataset == DATASET_PRESSURE_LEVELS:
-        request["pressure_level"] = args.pressure_levels
+        request["pressure_level"] = _canonical_pressure_levels(list(args.pressure_levels))
     return request
 
 
@@ -383,12 +419,109 @@ def print_dry_run(dataset: str, targets: list[DownloadTarget], overwrite: bool) 
         print(json.dumps(targets[0].request, indent=2, ensure_ascii=False))
 
 
+def _output_lock_path(output: Path) -> Path:
+    """Stable short lock name in the destination directory.
+
+    The basename is a hash of the target name so a destination already near
+    NAME_MAX does not grow a ``.lock`` suffix past the filesystem limit.
+    """
+    digest = hashlib.sha256(output.name.encode("utf-8")).hexdigest()[:16]
+    return output.with_name(f"era5-{digest}.lock")
+
+
+def _staging_path(output: Path) -> Path:
+    """Same-directory staging name that stays well under NAME_MAX."""
+    return output.with_name(f"part-{uuid.uuid4().hex}.part")
+
+
+_WINDOWS_LOCK_POLL_SECONDS = 0.2
+# ``msvcrt.LK_NBLCK`` raises these when another process still holds the region.
+_WINDOWS_LOCK_BUSY = {errno.EACCES, errno.EDEADLK, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
+
+
+def _acquire_file_lock(fd: int) -> None:
+    """Block on a kernel lock released automatically when the holder exits.
+
+    Unix uses ``flock``, which waits with no timeout. Windows ``msvcrt.LK_LOCK``
+    retries for about ten seconds and then raises, so a second run would record
+    a long CDS transfer as a download failure. ``LK_NBLCK`` is polled until the
+    other holder releases the region. ``os.kill(pid, 0)`` is not a liveness
+    probe on Windows because signal 0 terminates the process.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if exc.errno not in _WINDOWS_LOCK_BUSY:
+                    raise
+                time.sleep(_WINDOWS_LOCK_POLL_SECONDS)
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _release_file_lock(fd: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        return
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _exclusive_output_lock(output: Path) -> Iterator[None]:
+    """Block until this process holds the kernel lock for ``output``.
+
+    The lock file is never unlinked. Deleting it after a stale check can
+    remove a replacement lock created by another live download. The kernel
+    drops the lock when every holder fd closes, including on crash, so a
+    leftover file does not stay owned by a reused PID.
+    """
+    lock_path = _output_lock_path(output)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    acquired = False
+    try:
+        _acquire_file_lock(fd)
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            _release_file_lock(fd)
+        os.close(fd)
+
+
+def _discard_part_file(part_output: Path) -> None:
+    if not part_output.exists():
+        return
+    try:
+        part_output.unlink()
+    except OSError:
+        pass
+
+
 def retrieve_targets(
     dataset: str,
     targets: list[DownloadTarget],
     overwrite: bool,
     sleep_seconds: int,
     successful_targets: list[DownloadTarget] | None = None,
+    failure_messages: list[str] | None = None,
 ) -> int:
     try:
         import cdsapi
@@ -396,7 +529,7 @@ def retrieve_targets(
         raise RuntimeError("cdsapi is required for downloads. Install requirements and configure ~/.cdsapirc.") from exc
 
     client = cdsapi.Client()
-    failures: list[str] = []
+    failures = failure_messages if failure_messages is not None else []
     targets_to_download = [target for target in targets if overwrite or not target.output.exists()]
 
     if not targets_to_download:
@@ -405,30 +538,32 @@ def retrieve_targets(
 
     for index, target in enumerate(targets_to_download):
         target.output.parent.mkdir(parents=True, exist_ok=True)
-        run_id = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
-        part_output = target.output.with_name(f"{target.output.name}.{run_id}.part")
-        print(f"[{target.label}] downloading -> {target.output}")
+        part_output = _staging_path(target.output)
+        attempted_download = False
         try:
-            if part_output.exists():
-                part_output.unlink()
-            client.retrieve(dataset, target.request).download(str(part_output))
-            part_output.replace(target.output)
-            if successful_targets is not None:
-                successful_targets.append(target)
-            print(f"[{target.label}] ok")
-        except BaseException as exc:  # Clean up staging file on failure or interruption
-            if part_output.exists():
-                try:
-                    part_output.unlink()
-                except OSError:
-                    pass
-            if isinstance(exc, Exception):
-                failures.append(f"{target.label}: {exc}")
-                print(f"[{target.label}] error: {exc}", file=sys.stderr)
-            else:
-                raise
+            with _exclusive_output_lock(target.output):
+                if not overwrite and target.output.exists():
+                    print(f"[{target.label}] already exists, skipping {target.output}")
+                else:
+                    attempted_download = True
+                    print(f"[{target.label}] downloading -> {target.output}")
+                    try:
+                        _discard_part_file(part_output)
+                        client.retrieve(dataset, target.request).download(str(part_output))
+                        if not overwrite and target.output.exists():
+                            print(f"[{target.label}] already exists, skipping {target.output}")
+                        else:
+                            part_output.replace(target.output)
+                            if successful_targets is not None:
+                                successful_targets.append(target)
+                            print(f"[{target.label}] ok")
+                    finally:
+                        _discard_part_file(part_output)
+        except Exception as exc:  # pragma: no cover - depends on CDS/network
+            failures.append(f"{target.label}: {exc}")
+            print(f"[{target.label}] error: {exc}", file=sys.stderr)
 
-        if index < len(targets_to_download) - 1 and sleep_seconds > 0:
+        if attempted_download and index < len(targets_to_download) - 1 and sleep_seconds > 0:
             time.sleep(sleep_seconds)
 
     if failures:

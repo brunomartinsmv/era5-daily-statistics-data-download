@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -71,6 +75,23 @@ class BuildRequestTests(unittest.TestCase):
         self.assertNotIn("area", targets[0].request)
 
 
+def _daily_args(**overrides: object) -> era5.argparse.Namespace:
+    values: dict[str, object] = {
+        "output": None,
+        "start_year": 2020,
+        "end_year": 2020,
+        "months": None,
+        "statistic": "daily_mean",
+        "time_zone": "utc+00:00",
+        "frequency": "1_hourly",
+        "variables": ["2m_temperature"],
+        "area": None,
+        "output_dir": "downloads",
+    }
+    values.update(overrides)
+    return era5.argparse.Namespace(**values)
+
+
 class OutputPathTests(unittest.TestCase):
     def test_hourly_year_chunk_partial_months_includes_suffix(self) -> None:
         args = era5.argparse.Namespace(
@@ -87,111 +108,176 @@ class OutputPathTests(unittest.TestCase):
         )
         targets = era5.build_hourly_targets(args, "single-levels", era5.DATASET_SINGLE_LEVELS)
         self.assertEqual(len(targets), 2)
-        self.assertEqual(targets[0].output.name, "era5_single-levels_2020_11-12.zip")
-        self.assertEqual(targets[1].output.name, "era5_single-levels_2021_01-02.zip")
+        self.assertTrue(targets[0].output.name.startswith("era5_single-levels_2020_11-12_"))
+        self.assertTrue(targets[1].output.name.startswith("era5_single-levels_2021_01-02_"))
+        self.assertTrue(targets[0].output.name.endswith(".zip"))
+        self.assertIn(era5._request_fingerprint(targets[0].request), targets[0].output.name)
+        self.assertNotEqual(targets[0].output, targets[1].output)
+
+    def test_hourly_year_chunk_distinguishes_variables(self) -> None:
+        def build(variables: list[str]) -> Path:
+            args = era5.argparse.Namespace(
+                start_year=2020,
+                end_year=2020,
+                start_month=6,
+                end_month=8,
+                variables=variables,
+                area=None,
+                format="grib",
+                download_format="zip",
+                chunk="year",
+                output_dir="downloads",
+            )
+            return era5.build_hourly_targets(args, "single-levels", era5.DATASET_SINGLE_LEVELS)[0].output
+
+        self.assertNotEqual(build(["2m_temperature"]), build(["surface_pressure"]))
+
     def test_single_year_deterministic_name(self) -> None:
-        args = era5.argparse.Namespace(
-            output=None,
-            start_year=2020,
-            end_year=2020,
-            statistic="daily_mean",
-            output_dir="downloads",
-        )
+        args = _daily_args()
         path = era5._single_output_path(args, "era5_daily_statistics", "nc")
-        self.assertEqual(path, Path("downloads/era5_daily_statistics_2020.nc"))
+        request = era5._daily_statistics_request(args)
+        fingerprint = era5._request_fingerprint(request)
+        self.assertEqual(
+            path,
+            Path(f"downloads/era5_daily_statistics_2020_2m_temperature_1_hourly_utc+00-00_{fingerprint}.nc"),
+        )
+        self.assertEqual(path, era5._single_output_path(args, "era5_daily_statistics", "nc"))
 
     def test_multi_year_deterministic_name(self) -> None:
-        args = era5.argparse.Namespace(
-            output=None,
-            start_year=2020,
-            end_year=2023,
-            statistic="daily_mean",
-            output_dir="downloads",
-        )
+        args = _daily_args(end_year=2023)
         path = era5._single_output_path(args, "era5_daily_statistics", "nc")
-        self.assertEqual(path, Path("downloads/era5_daily_statistics_2020_2023.nc"))
+        self.assertIn("2020_2023", path.name)
+        self.assertEqual(path, era5._single_output_path(args, "era5_daily_statistics", "nc"))
 
     def test_custom_statistic_included_in_name(self) -> None:
-        args = era5.argparse.Namespace(
-            output=None,
-            start_year=2020,
-            end_year=2020,
-            statistic="daily_maximum",
-            output_dir="downloads",
-        )
+        args = _daily_args(statistic="daily_maximum")
         path = era5._single_output_path(args, "era5_daily_statistics", "nc")
-        self.assertEqual(path, Path("downloads/era5_daily_statistics_2020_daily_maximum.nc"))
+        self.assertIn("daily_maximum", path.name)
+        self.assertNotIn("daily_mean", path.name)
 
     def test_differentiates_variables_in_filename(self) -> None:
-        args_temp = era5.argparse.Namespace(
-            output=None,
-            start_year=2020,
-            end_year=2020,
-            variables=["2m_temperature"],
-            statistic="daily_mean",
-            time_zone="utc+00:00",
-            frequency="1_hourly",
-            months=None,
-            area=None,
-            output_dir="downloads",
-        )
-        args_press = era5.argparse.Namespace(
-            output=None,
-            start_year=2020,
-            end_year=2020,
-            variables=["surface_pressure"],
-            statistic="daily_mean",
-            time_zone="utc+00:00",
-            frequency="1_hourly",
-            months=None,
-            area=None,
-            output_dir="downloads",
-        )
-        targets_temp = era5.build_daily_statistics_target(args_temp)
-        targets_press = era5.build_daily_statistics_target(args_press)
+        path_temp = era5._single_output_path(_daily_args(variables=["2m_temperature"]), "era5_daily_statistics", "nc")
+        path_press = era5._single_output_path(_daily_args(variables=["surface_pressure"]), "era5_daily_statistics", "nc")
+        self.assertNotEqual(path_temp, path_press)
+        self.assertIn("2m_temperature", path_temp.name)
+        self.assertIn("surface_pressure", path_press.name)
+        targets_temp = era5.build_daily_statistics_target(_daily_args(variables=["2m_temperature"]))
+        targets_press = era5.build_daily_statistics_target(_daily_args(variables=["surface_pressure"]))
         self.assertNotEqual(targets_temp[0].output, targets_press[0].output)
         self.assertTrue(targets_temp[0].output.name.startswith("era5_daily_statistics_2020_2m_temperature_"))
         self.assertTrue(targets_press[0].output.name.startswith("era5_daily_statistics_2020_surface_pressure_"))
 
-    def test_differentiates_frequency_and_timezone(self) -> None:
-        args_1h = era5.argparse.Namespace(
-            variables=["2m_temperature"],
-            start_year=2020,
-            end_year=2020,
-            months=None,
-            statistic="daily_mean",
-            time_zone="utc+00:00",
-            frequency="1_hourly",
-            output=None,
-            output_dir="downloads",
-            area=None,
-        )
-        args_3h = era5.argparse.Namespace(
-            variables=["2m_temperature"],
-            start_year=2020,
-            end_year=2020,
-            months=None,
-            statistic="daily_mean",
-            time_zone="utc+00:00",
-            frequency="3_hourly",
-            output=None,
-            output_dir="downloads",
-            area=None,
-        )
-        t_1h = era5.build_daily_statistics_target(args_1h)
-        t_3h = era5.build_daily_statistics_target(args_3h)
-        self.assertNotEqual(t_1h[0].output, t_3h[0].output)
-
     def test_explicit_output_preserved(self) -> None:
-        args = era5.argparse.Namespace(
-            output="custom/path/data.nc",
-            start_year=2020,
-            end_year=2020,
-            statistic="daily_mean",
-            output_dir="downloads",
-        )
+        args = _daily_args(output="custom/path/data.nc")
         path = era5._single_output_path(args, "era5_daily_statistics", "nc")
         self.assertEqual(path, Path("custom/path/data.nc"))
+
+    def test_equal_length_month_sets_do_not_share_a_path(self) -> None:
+        january = _daily_args(months=["01", "02", "03", "04"])
+        september = _daily_args(months=["09", "10", "11", "12"])
+        path_january = era5._single_output_path(january, "era5_daily_statistics", "nc")
+        path_september = era5._single_output_path(september, "era5_daily_statistics", "nc")
+        self.assertNotEqual(path_january, path_september)
+        self.assertIn("m01-02-03-04", path_january.name)
+        self.assertIn("m09-10-11-12", path_september.name)
+        self.assertNotIn("4months", path_january.name)
+
+    def test_short_month_lists_keep_padding_and_separators(self) -> None:
+        split_months = era5._single_output_path(_daily_args(months=["1", "2"]), "era5_daily_statistics", "nc")
+        december = era5._single_output_path(_daily_args(months=["12"]), "era5_daily_statistics", "nc")
+        self.assertNotEqual(split_months, december)
+        self.assertIn("m01-02", split_months.name)
+        self.assertIn("m12", december.name)
+
+    def test_month_formatting_does_not_change_the_path(self) -> None:
+        padded = era5._single_output_path(
+            _daily_args(months=["04", "05", "06", "07"]),
+            "era5_daily_statistics",
+            "nc",
+        )
+        unpadded = era5._single_output_path(
+            _daily_args(months=["4", "5", "6", "7"]),
+            "era5_daily_statistics",
+            "nc",
+        )
+        self.assertEqual(padded, unpadded)
+
+    def test_frequency_and_time_zone_change_the_path(self) -> None:
+        baseline = _daily_args()
+        six_hourly = _daily_args(frequency="6_hourly")
+        other_zone = _daily_args(time_zone="utc+01:00")
+        path_baseline = era5._single_output_path(baseline, "era5_daily_statistics", "nc")
+        path_six_hourly = era5._single_output_path(six_hourly, "era5_daily_statistics", "nc")
+        path_other_zone = era5._single_output_path(other_zone, "era5_daily_statistics", "nc")
+        self.assertNotEqual(path_baseline, path_six_hourly)
+        self.assertNotEqual(path_baseline, path_other_zone)
+        self.assertIn("6_hourly", path_six_hourly.name)
+        self.assertIn("utc+01-00", path_other_zone.name)
+        self.assertIn(
+            era5._request_fingerprint(era5._daily_statistics_request(six_hourly)),
+            path_six_hourly.name,
+        )
+        self.assertIn(
+            era5._request_fingerprint(era5._daily_statistics_request(other_zone)),
+            path_other_zone.name,
+        )
+
+    def test_built_target_uses_the_same_unique_path(self) -> None:
+        args = _daily_args(months=["06", "07", "08"], frequency="3_hourly", area=[-15.0, -56.5, -16.5, -55.5])
+        target = era5.build_daily_statistics_target(args)[0]
+        self.assertEqual(target.output, era5._single_output_path(args, "era5_daily_statistics", "nc"))
+        self.assertEqual(target.request["month"], ["06", "07", "08"])
+        self.assertEqual(target.request["frequency"], "3_hourly")
+        self.assertIn(era5._request_fingerprint(target.request), target.output.name)
+        self.assertIn("area_-15_-56.5_-16.5_-55.5", target.output.name)
+
+    def test_variable_order_does_not_change_the_path(self) -> None:
+        forward = era5._single_output_path(
+            _daily_args(variables=["surface_pressure", "2m_temperature"]),
+            "era5_daily_statistics",
+            "nc",
+        )
+        reverse = era5._single_output_path(
+            _daily_args(variables=["2m_temperature", "surface_pressure"]),
+            "era5_daily_statistics",
+            "nc",
+        )
+        self.assertEqual(forward, reverse)
+        self.assertIn("2m_temperature_surface_pressure", forward.name)
+
+    def test_pressure_level_order_does_not_change_the_path(self) -> None:
+        def build(levels: list[str]) -> era5.DownloadTarget:
+            args = era5.argparse.Namespace(
+                start_year=2020,
+                end_year=2020,
+                start_month=1,
+                end_month=1,
+                variables=["temperature"],
+                area=None,
+                format="netcdf",
+                download_format="unarchived",
+                chunk="month",
+                output_dir="downloads",
+                pressure_levels=levels,
+            )
+            return era5.build_hourly_targets(args, "pressure-levels", era5.DATASET_PRESSURE_LEVELS)[0]
+
+        descending = build(["1000", "850", "500"])
+        ascending = build(["500", "850", "1000"])
+        self.assertEqual(descending.output, ascending.output)
+        self.assertEqual(descending.request["pressure_level"], ["500", "850", "1000"])
+        self.assertEqual(ascending.request["pressure_level"], ["500", "850", "1000"])
+        fingerprint = era5._request_fingerprint(descending.request)
+        self.assertEqual(fingerprint, era5._request_fingerprint(ascending.request))
+        self.assertIn(fingerprint, descending.output.name)
+
+        named = build(["b", "a"])
+        renamed = build(["a", "b"])
+        self.assertEqual(named.output, renamed.output)
+        self.assertEqual(named.request["pressure_level"], ["a", "b"])
+
+        other_levels = build(["850", "700"])
+        self.assertNotEqual(descending.output, other_levels.output)
 
 
 class MonthValidationTests(unittest.TestCase):
@@ -226,8 +312,10 @@ class AtomicDownloadTests(unittest.TestCase):
             mock_client = MagicMock()
             def fake_download(path_str: str) -> None:
                 p = Path(path_str)
+                self.assertTrue(p.name.startswith("part-"))
                 self.assertTrue(p.name.endswith(".part"))
-                self.assertIn("output.nc.", p.name)
+                self.assertLessEqual(len(p.name.encode("utf-8")), 80)
+                self.assertNotIn("output.nc", p.name)
                 p.write_text("data")
 
             mock_client.retrieve.return_value.download.side_effect = fake_download
@@ -240,8 +328,7 @@ class AtomicDownloadTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertTrue(dest.exists())
             self.assertEqual(dest.read_text(), "data")
-            remaining_part_files = list(Path(tmpdir).glob("*.part"))
-            self.assertEqual(len(remaining_part_files), 0)
+            self.assertEqual(list(Path(tmpdir).glob("*.part")), [])
 
     def test_failed_download_cleans_up_part_file_without_corrupting_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -267,8 +354,265 @@ class AtomicDownloadTests(unittest.TestCase):
 
             self.assertEqual(code, 1)
             self.assertFalse(dest.exists())
-            remaining_part_files = list(Path(tmpdir).glob("*.part"))
-            self.assertEqual(len(remaining_part_files), 0)
+            self.assertEqual(list(Path(tmpdir).glob("*.part")), [])
+
+    def test_keyboard_interrupt_removes_partial_file_and_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            target = era5.DownloadTarget(
+                label="test_interrupt",
+                request={"var": "2m_temperature"},
+                output=dest,
+            )
+
+            mock_client = MagicMock()
+
+            def interrupted(path_str: str) -> None:
+                Path(path_str).write_text("partial")
+                raise KeyboardInterrupt
+
+            mock_client.retrieve.return_value.download.side_effect = interrupted
+            mock_cdsapi = MagicMock()
+            mock_cdsapi.Client.return_value = mock_client
+
+            with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                with self.assertRaises(KeyboardInterrupt):
+                    era5.retrieve_targets("dummy-dataset", [target], overwrite=True, sleep_seconds=0)
+
+            self.assertFalse(dest.exists())
+            self.assertEqual(list(Path(tmpdir).glob("*.part")), [])
+
+            def complete(path_str: str) -> None:
+                Path(path_str).write_text("ok")
+
+            mock_client.retrieve.return_value.download.side_effect = complete
+            with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                code = era5.retrieve_targets("dummy-dataset", [target], overwrite=True, sleep_seconds=0)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(dest.read_text(), "ok")
+
+    def test_second_target_does_not_replace_completed_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            targets = [
+                era5.DownloadTarget(label="first", request={"n": 1}, output=dest),
+                era5.DownloadTarget(label="second", request={"n": 2}, output=dest),
+            ]
+            calls: list[str] = []
+            mock_client = MagicMock()
+
+            def fake_download(path_str: str) -> None:
+                calls.append(path_str)
+                Path(path_str).write_text(f"payload-{len(calls)}")
+
+            mock_client.retrieve.return_value.download.side_effect = fake_download
+            mock_cdsapi = MagicMock()
+            mock_cdsapi.Client.return_value = mock_client
+
+            with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                code = era5.retrieve_targets("dummy", targets, overwrite=False, sleep_seconds=0)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(dest.read_text(), "payload-1")
+
+    def test_parallel_downloads_do_not_start_a_second_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            target = era5.DownloadTarget(label="parallel", request={"var": "t"}, output=dest)
+            calls: list[str] = []
+            started = threading.Barrier(2)
+            both_saw_missing = threading.Event()
+            seen_ids: set[int] = set()
+            seen_lock = threading.Lock()
+            original_exists = Path.exists
+
+            def tracking_exists(self: Path) -> bool:
+                result = original_exists(self)
+                if self == dest and not result:
+                    with seen_lock:
+                        seen_ids.add(threading.get_ident())
+                        if len(seen_ids) >= 2:
+                            both_saw_missing.set()
+                return result
+
+            def fake_download(path_str: str) -> None:
+                calls.append(path_str)
+                self.assertTrue(both_saw_missing.wait(5))
+                Path(path_str).write_text("payload")
+
+            def worker() -> None:
+                started.wait(5)
+                era5.retrieve_targets("dummy", [target], overwrite=False, sleep_seconds=0)
+
+            mock_client = MagicMock()
+            mock_client.retrieve.return_value.download.side_effect = fake_download
+            mock_cdsapi = MagicMock()
+            mock_cdsapi.Client.return_value = mock_client
+
+            with patch.dict("sys.modules", {"cdsapi": mock_cdsapi}):
+                with patch.object(Path, "exists", tracking_exists):
+                    threads = [threading.Thread(target=worker, daemon=True) for _ in range(2)]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join(5)
+                        self.assertFalse(thread.is_alive())
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(dest.read_text(), "payload")
+            self.assertEqual(list(Path(tmpdir).glob("*.part")), [])
+
+    def test_output_lock_is_exclusive_across_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            held = threading.Event()
+            release = threading.Event()
+            acquired_second = threading.Event()
+
+            def holder() -> None:
+                with era5._exclusive_output_lock(dest):
+                    held.set()
+                    self.assertTrue(release.wait(5))
+
+            def waiter() -> None:
+                self.assertTrue(held.wait(5))
+                with era5._exclusive_output_lock(dest):
+                    acquired_second.set()
+
+            first = threading.Thread(target=holder, daemon=True)
+            second = threading.Thread(target=waiter, daemon=True)
+            first.start()
+            second.start()
+            self.assertTrue(held.wait(5))
+            time.sleep(0.1)
+            self.assertFalse(acquired_second.is_set())
+            release.set()
+            first.join(5)
+            second.join(5)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertTrue(acquired_second.is_set())
+            lock_path = era5._output_lock_path(dest)
+            self.assertTrue(lock_path.exists())
+            self.assertLessEqual(len(lock_path.name.encode("utf-8")), 64)
+
+    def test_waiter_keeps_the_holders_lock_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            lock_path = era5._output_lock_path(dest)
+            held = threading.Event()
+            release = threading.Event()
+            seen_inode: dict[str, int] = {}
+
+            def holder() -> None:
+                with era5._exclusive_output_lock(dest):
+                    seen_inode["value"] = lock_path.stat().st_ino
+                    held.set()
+                    self.assertTrue(release.wait(5))
+
+            def waiter() -> None:
+                self.assertTrue(held.wait(5))
+                self.assertEqual(lock_path.stat().st_ino, seen_inode["value"])
+                with era5._exclusive_output_lock(dest):
+                    self.assertEqual(lock_path.stat().st_ino, seen_inode["value"])
+
+            first = threading.Thread(target=holder, daemon=True)
+            second = threading.Thread(target=waiter, daemon=True)
+            first.start()
+            second.start()
+            self.assertTrue(held.wait(5))
+            time.sleep(0.1)
+            self.assertTrue(lock_path.exists())
+            self.assertEqual(lock_path.stat().st_ino, seen_inode["value"])
+            release.set()
+            first.join(5)
+            second.join(5)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+
+    def test_windows_lock_waits_past_the_ten_second_give_up(self) -> None:
+        entered = False
+        attempts = {"n": 0}
+        modes: list[int] = []
+        sleeps: list[float] = []
+
+        class FakeMsvcrt:
+            LK_NBLCK = 2
+            LK_LOCK = 1
+            LK_UNLCK = 0
+
+            @staticmethod
+            def locking(fd: int, mode: int, nbytes: int) -> None:
+                modes.append(mode)
+                if mode == FakeMsvcrt.LK_UNLCK:
+                    return
+                attempts["n"] += 1
+                if attempts["n"] <= 12:
+                    error = OSError("region locked")
+                    error.errno = errno.EACCES if attempts["n"] % 2 else errno.EDEADLK
+                    raise error
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.nc"
+            with patch.object(era5.sys, "platform", "win32"):
+                with patch.dict(sys.modules, {"msvcrt": FakeMsvcrt}):
+                    with patch.object(era5.time, "sleep", sleeps.append):
+                        with era5._exclusive_output_lock(dest):
+                            entered = True
+
+        self.assertTrue(entered)
+        self.assertGreater(attempts["n"], 10)
+        self.assertNotIn(FakeMsvcrt.LK_LOCK, modes)
+        self.assertEqual(sleeps, [era5._WINDOWS_LOCK_POLL_SECONDS] * 12)
+        self.assertEqual(modes[-1], FakeMsvcrt.LK_UNLCK)
+
+    def test_windows_lock_does_not_retry_a_bad_descriptor(self) -> None:
+        calls = {"n": 0}
+
+        class FakeMsvcrt:
+            LK_NBLCK = 2
+
+            @staticmethod
+            def locking(fd: int, mode: int, nbytes: int) -> None:
+                calls["n"] += 1
+                error = OSError("bad fd")
+                error.errno = errno.EBADF
+                raise error
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fd = os.open(Path(tmpdir) / "lock", os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                with patch.object(era5.sys, "platform", "win32"):
+                    with patch.dict(sys.modules, {"msvcrt": FakeMsvcrt}):
+                        with self.assertRaises(OSError) as caught:
+                            era5._acquire_file_lock(fd)
+            finally:
+                os.close(fd)
+
+        self.assertEqual(caught.exception.errno, errno.EBADF)
+        self.assertEqual(calls["n"], 1)
+
+    def test_pid_text_in_a_lock_file_does_not_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / ("n" * 200 + ".nc")
+            lock_path = era5._output_lock_path(dest)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text("1-live-unrelated-process", encoding="ascii")
+            acquired = threading.Event()
+
+            def take() -> None:
+                with era5._exclusive_output_lock(dest):
+                    acquired.set()
+
+            thread = threading.Thread(target=take, daemon=True)
+            thread.start()
+            self.assertTrue(acquired.wait(2))
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+            self.assertLessEqual(len(lock_path.name.encode("utf-8")), 64)
+            self.assertLessEqual(len(era5._staging_path(dest).name.encode("utf-8")), 80)
 
     def test_interrupted_download_cleans_up_staging_file_and_reraises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -394,6 +738,8 @@ class TemperatureRegimeScriptTests(unittest.TestCase):
 
                 self.assertEqual(generated, [])
                 self.assertEqual(len(failures), 1)
+                self.assertIn("Failed", failures[0])
+                self.assertIn("single-levels:2020:01-12", failures[0])
             finally:
                 tr.DATASETS["single-levels"]["output_dir"] = orig_dir
 

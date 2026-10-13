@@ -8,6 +8,7 @@ config.ini
 *.csv
 *.zip
 *.part
+*.lock
 data/
 
 # Python

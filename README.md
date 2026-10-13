@@ -165,8 +165,23 @@ python3 download_era5_daily.py model-levels \
     --dry-run
 ```
 
-See [examples/daily_statistics_examples.py](examples/daily_statistics_examples.py)
-for legacy daily-statistics API examples.
+## Python API
+
+`download_era5_daily_stats` runs one daily-statistics request and returns
+whether the download succeeded:
+
+```python
+from download_era5_daily import download_era5_daily_stats
+
+ok = download_era5_daily_stats(
+    variables=["2m_temperature"],
+    year_start=2020,
+    year_end=2020,
+    months=["06", "07", "08"],
+)
+```
+
+More cases are in [examples/daily_statistics_examples.py](examples/daily_statistics_examples.py).
 
 ## Auxiliary Scripts
 
@@ -189,9 +204,38 @@ python3 scripts/download_era5_temperature_regime_vars.py --start-year 2020 --end
 ## Output Format
 
 Daily-statistics downloads are saved as NetCDF (`.nc`) by default. Hourly ERA5
-product downloads are saved as ZIP files containing GRIB by default. Downloads
-use atomic writing (`.part` temporary file renamed on completion) to prevent partial
-or corrupted files if a download is interrupted. These formats can be read with:
+product downloads are saved as ZIP files containing GRIB by default.
+
+When `--output` is omitted, the daily-statistics filename is built from the
+request: year span, statistic (other than `daily_mean`), variables, the month
+list when it is not the full year (`m01-02-03-04`, not a month count), sampling
+frequency, time zone, area when set, and a 10-character hash of the canonical
+request. Variable order is normalized, and month spellings such as `4` and `04`
+share a path. Two queries that differ in months, frequency, time zone, or any
+other request field get different paths, so an existing file is not reused for
+a different query.
+
+Hourly presets that chunk by year write one file per year. If that year is only
+partly requested, the filename includes the month span
+(`era5_single-levels_2020_11-12_<hash>.zip`). The hash covers the rest of the
+request, including variables, area, format, and pressure levels. For a range
+such as November through February across more than two years, the first year
+starts at `--start-month`, the last year ends at `--end-month`, and each year
+in between is the full January–December set.
+
+Each download is written to a short `part-<hex>.part` file in the same directory
+and renamed into place only after the transfer finishes. The staging name does
+not extend the destination basename, so a long `--output` name still fits the
+filesystem limit. The process holds a kernel lock on a short `era5-<hash>.lock`
+file in that directory (`flock` on Unix, `msvcrt.locking` on Windows) and checks
+the destination again after acquiring it. A second run with the same target
+waits, then skips the file if it is already present, unless `--overwrite` is
+set. Cancelling the download deletes the partial `.part` file and releases the
+lock. The lock file is left in place; the kernel drops it when the holder
+exits, including after a crash. This is a local file lock, not a lock on a
+shared network filesystem.
+
+These formats can be read with:
 
 - Python: `xarray`, `netCDF4`, `pandas`
 - R: `ncdf4`, `raster`
@@ -228,8 +272,8 @@ python3 -m unittest discover -s tests -v
 ```
 
 The tests exercise argument parsing, request construction, deterministic output
-naming, atomic downloads, and `--dry-run` flows for the main entrypoint and
-auxiliary scripts.
+naming, atomic downloads, destination locking, and `--dry-run` flows for the
+main entrypoint and auxiliary scripts.
 
 ## Troubleshooting
 
