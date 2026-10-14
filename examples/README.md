@@ -15,5 +15,5 @@ Run from the repository root:
 python3 examples/daily_statistics_examples.py
 ```
 
-The script prints setup instructions by default. Uncomment one example function
-inside the file to execute a real CDS download.
+The script prints setup instructions and does not download. Call one example
+function from `main` to run a real CDS request.

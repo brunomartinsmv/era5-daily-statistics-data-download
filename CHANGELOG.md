@@ -10,6 +10,10 @@ include a short summary and link here rather than duplicating the full changelog
 
 ## [Unreleased]
 
+### Changed
+
+- Removed comments that restated the code, commented-out example calls, and the long Cuiabá evapotranspiration docstring. Public docstrings remain, along with short notes on CDS area order, request hashing, filename limits, units, and download locking.
+
 ## [2.1.0] - 2026-10-12
 
 ### Added

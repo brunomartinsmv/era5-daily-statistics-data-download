@@ -13,7 +13,7 @@ from download_era5_daily import DownloadTarget, retrieve_targets  # noqa: E402
 
 YEAR_START = 2005
 YEAR_END = 2023
-AREA_CUIABA = [-15.0, -56.5, -16.5, -55.5]  # N, W, S, E
+AREA_CUIABA = [-15.0, -56.5, -16.5, -55.5]  # CDS order: N, W, S, E
 MONTHS = [f"{month:02d}" for month in range(1, 13)]
 DAYS = [f"{day:02d}" for day in range(1, 32)]
 TIMES = [f"{hour:02d}:00" for hour in range(24)]
