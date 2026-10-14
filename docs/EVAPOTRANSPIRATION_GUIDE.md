@@ -165,7 +165,7 @@ Using the Python API:
 ```python
 from download_era5_daily import download_era5_daily_stats
 
-# Cuiaba region bounding box: [North, West, South, East]
+# CDS area order: North, West, South, East.
 cuiaba_area = [-13.6, -58.1, -17.6, -54.1]
 
 download_era5_daily_stats(
@@ -203,8 +203,9 @@ python3 download_era5_daily.py daily-statistics \
 Or run the example directly:
 ```bash
 python3 examples/daily_statistics_examples.py
-# Then uncomment: example_evapotranspiration_cuiaba()
 ```
+
+That command prints setup notes and does not download. Call `example_evapotranspiration_cuiaba()` from `main` to run this case.
 
 ## Processing the Downloaded Data
 
@@ -214,10 +215,9 @@ python3 examples/daily_statistics_examples.py
 import xarray as xr
 import numpy as np
 
-# Load the downloaded data
 ds = xr.open_dataset('era5_evapotranspiration_cuiaba_2020_2023.nc')
 
-# Extract variables (variable names may differ in the file)
+# NetCDF keys are short names, which can differ from the CDS request names.
 T2m = ds['t2m'] - 273.15  # Convert K to °C
 Tdew = ds['d2m'] - 273.15  # Convert K to °C
 u10 = ds['u10']
@@ -227,37 +227,31 @@ P = ds['sp'] / 1000  # Convert Pa to kPa
 precip = ds['tp'] * 1000  # Convert m to mm
 et_era5 = -ds['e'] * 1000  # Convert m to mm (negative to positive)
 
-# Calculate wind speed at 2m
+# FAO-56 log profile from 10 m wind to 2 m.
 wind_10m = np.sqrt(u10**2 + v10**2)
 wind_2m = wind_10m * 4.87 / np.log(67.8 * 10 - 5.42)
 
-# Calculate vapor pressures
 es = 0.6108 * np.exp((17.27 * T2m) / (T2m + 237.3))
 ea = 0.6108 * np.exp((17.27 * Tdew) / (Tdew + 237.3))
 vpd = es - ea
 
-# Calculate psychrometric parameters
 delta = 4098 * es / (T2m + 237.3)**2
 gamma = 0.000665 * P
 
-# Calculate ET0 using Penman-Monteith
-# (simplified, assuming G ≈ 0 for daily data)
+# Soil heat flux G is taken as 0, the usual daily-step assumption in FAO-56.
 numerator = 0.408 * delta * Rn + gamma * (900/(T2m+273)) * wind_2m * vpd
 denominator = delta + gamma * (1 + 0.34 * wind_2m)
 ET0 = numerator / denominator
 
-# Add ET0 to dataset
 ds['ET0'] = ET0
 ds['ET0'].attrs['units'] = 'mm/day'
 ds['ET0'].attrs['long_name'] = 'Reference Evapotranspiration (FAO-56 Penman-Monteith)'
 
-# Calculate water balance
 water_deficit = precip - ET0
 ds['water_deficit'] = water_deficit
 ds['water_deficit'].attrs['units'] = 'mm/day'
 ds['water_deficit'].attrs['long_name'] = 'Precipitation minus ET0'
 
-# Save processed data
 ds.to_netcdf('cuiaba_processed_et_2020_2023.nc')
 
 print(f"Mean annual ET0: {ET0.mean(['time', 'latitude', 'longitude']).values:.2f} mm/day")
@@ -268,7 +262,7 @@ print(f"Mean annual ERA5 ET: {et_era5.mean(['time', 'latitude', 'longitude']).va
 ### Seasonal Analysis
 
 ```python
-# Group by season
+# Cuiaba wet season is October-April; dry season is May-September.
 wet_season = ds.sel(time=ds.time.dt.month.isin([10,11,12,1,2,3,4]))
 dry_season = ds.sel(time=ds.time.dt.month.isin([5,6,7,8,9]))
 

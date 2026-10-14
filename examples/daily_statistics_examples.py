@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-Example usage script for ERA5 daily statistics download.
-
-This script demonstrates various use cases for downloading ERA5 data.
-Modify the examples below to suit your needs.
-"""
+"""Examples that call download_era5_daily_stats."""
 
 from pathlib import Path
 import sys
@@ -55,7 +50,7 @@ def example_summer_months_max_temp():
         variables=['2m_temperature'],
         year_start=2020,
         year_end=2023,
-        months=['06', '07', '08'],  # June, July, August
+        months=['06', '07', '08'],
         daily_statistic='daily_maximum',
         output_file='era5_temp_max_summer_2020_2023.nc'
     )
@@ -65,8 +60,7 @@ def example_regional_data():
     """Download data for a specific region (Europe)."""
     print("\nExample 4: Downloading temperature for Europe (2023)\n")
     
-    # Area: [North, West, South, East]
-    # Europe bounding box: approximately 71N, -25W, 35N, 40E
+    # CDS area order is N, W, S, E.
     europe_area = [71, -25, 35, 40]
     
     download_era5_daily_stats(
@@ -92,32 +86,10 @@ def example_historical_data():
 
 
 def example_evapotranspiration_cuiaba():
-    """
-    Download all variables necessary for evapotranspiration analysis of Cuiaba, Brazil.
-    
-    Cuiaba is the capital of Mato Grosso state in Brazil, located in the tropics.
-    Coordinates: approximately 15.6°S, 56.1°W
-    
-    This example downloads variables needed for calculating evapotranspiration using
-    methods such as Penman-Monteith or FAO-56:
-    
-    Variables downloaded:
-    - 2m_temperature: Air temperature (drives evaporative demand)
-    - 2m_dewpoint_temperature: For vapor pressure deficit calculation
-    - 10m_u_component_of_wind: East-west wind component
-    - 10m_v_component_of_wind: North-south wind component (for wind speed calculation)
-    - surface_net_solar_radiation: Net solar radiation (primary energy source)
-    - surface_pressure: Atmospheric pressure (for psychrometric calculations)
-    - total_precipitation: Precipitation (water balance component)
-    - total_evaporation: Direct evaporation output from ERA5
-    
-    The bounding box covers Cuiaba and surrounding region in Mato Grosso.
-    """
+    """Daily-mean fields for Penman-Monteith ET around Cuiaba (15.6°S, 56.1°W)."""
     print("\nExample 6: Downloading evapotranspiration variables for Cuiaba, Brazil\n")
-    
-    # Cuiaba region bounding box: [North, West, South, East]
-    # Covers Cuiaba and surrounding region (~2 degrees buffer)
-    # Cuiaba center: 15.6°S (or latitude -15.6), 56.1°W (or longitude -56.1)
+
+    # CDS area order is N, W, S, E. Box is about 2° around 15.6°S, 56.1°W.
     cuiaba_area = [-13.6, -58.1, -17.6, -54.1]
     
     print("Region: Cuiaba, Mato Grosso, Brazil")
@@ -150,14 +122,6 @@ def example_evapotranspiration_cuiaba():
 
 
 def main():
-    """
-    Main function - uncomment the example you want to run.
-    
-    NOTE: Before running this script:
-    1. Install requirements: pip install -r requirements.txt
-    2. Copy config/cdsapirc.example to ~/.cdsapirc and add your CDS credentials
-    """
-    
     print("ERA5 Daily Statistics Download Examples")
     print("=" * 50)
     print("\nIMPORTANT: Make sure you have:")
@@ -167,16 +131,7 @@ def main():
     print("   https://cds.climate.copernicus.eu/datasets/derived-era5-single-levels-daily-statistics")
     print("\n" + "=" * 50 + "\n")
     
-    # Uncomment ONE of the examples below to run:
-    
-    # example_temperature_recent_years()
-    # example_multiple_variables()
-    # example_summer_months_max_temp()
-    # example_regional_data()
-    # example_historical_data()
-    # example_evapotranspiration_cuiaba()
-    
-    print("\nUncomment one of the examples in the script to run it.")
+    print("\nNo example ran. Call one of the example functions from main() to download.")
 
 
 if __name__ == '__main__':

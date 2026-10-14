@@ -559,7 +559,7 @@ def retrieve_targets(
                             print(f"[{target.label}] ok")
                     finally:
                         _discard_part_file(part_output)
-        except Exception as exc:  # pragma: no cover - depends on CDS/network
+        except Exception as exc:
             failures.append(f"{target.label}: {exc}")
             print(f"[{target.label}] error: {exc}", file=sys.stderr)
 

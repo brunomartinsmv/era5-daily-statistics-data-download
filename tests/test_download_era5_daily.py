@@ -1,5 +1,3 @@
-"""Tests for the ERA5 download CLI and library."""
-
 from __future__ import annotations
 
 import errno
